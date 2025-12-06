@@ -802,6 +802,30 @@ class Device:
         self.m_local_dashboard_sio.start_background_task(target=self.send_device_data)
         return "Ok"
 
+    def get_files(self):
+        """Return the current scanned files for the local dashboard."""
+
+        files = self.m_files or []
+
+        # Keep newest-first ordering based on start_time when present
+        try:
+            files = sorted(
+                files,
+                key=lambda f: f.get("start_time", ""),
+                reverse=True,
+            )
+        except Exception:
+            # Sorting is best-effort; fall back to existing order
+            pass
+
+        is_scanning = bool(self.m_reindex_thread or self.m_metadata_thread or self.m_hash_thread)
+
+        return jsonify({
+            "count": len(files),
+            "files": files,
+            "scanning": is_scanning,
+        })
+
     def index(self):
         return send_from_directory("static", "index.html")
 
