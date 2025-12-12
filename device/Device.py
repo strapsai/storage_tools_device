@@ -328,7 +328,7 @@ class Device:
             msg (any): message
         """
         count = 0
-        for addr, sio in self.server_sio.items():
+        for sio in self.server_sio.values():
             if sio and sio.connected:
                 count += 1
                 sio.emit(event, msg)
