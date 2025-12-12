@@ -95,6 +95,79 @@ function refreshConfig() {
         });
 }
 
+function formatBytes(bytes) {
+    if (!bytes && bytes !== 0) return "--";
+    let size = Number(bytes);
+    if (Number.isNaN(size)) return "--";
+    const units = ["B", "KB", "MB", "GB", "TB"];
+    let unit = 0;
+    while (size >= 1024 && unit < units.length - 1) {
+        size /= 1024;
+        unit += 1;
+    }
+    return `${size.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
+}
+
+function formatTime(value) {
+    return value && value.length > 0 ? value : "--";
+}
+
+function renderFiles(payload) {
+    const tbody = document.getElementById("files-tbody");
+    const meta = document.getElementById("files-meta");
+    if (!tbody) return;
+
+    tbody.innerHTML = "";
+    const files = payload?.files || [];
+
+    if (meta) {
+        const scanningNote = payload?.scanning ? " (scan running)" : "";
+        meta.textContent = `Showing ${files.length} file${files.length === 1 ? "" : "s"}${scanningNote}`;
+    }
+
+    if (files.length === 0) {
+        const row = document.createElement("tr");
+        row.innerHTML = `<td colspan="5" class="text-muted">No files yet${payload?.scanning ? " (scan running...)" : ""}</td>`;
+        tbody.appendChild(row);
+        return;
+    }
+
+    files.forEach(file => {
+        const tr = document.createElement("tr");
+        const filepath = [file.dirroot, file.filename].filter(Boolean).join("/");
+        tr.innerHTML = `
+            <td class="text-break">${filepath}</td>
+            <td class="text-end">${formatBytes(file.size)}</td>
+            <td>${formatTime(file.start_time)}</td>
+            <td>${formatTime(file.end_time)}</td>
+            <td>${file.site || "--"}</td>
+        `;
+        tbody.appendChild(tr);
+    });
+}
+
+function refreshFiles() {
+    const meta = document.getElementById("files-meta");
+    if (meta) meta.textContent = "Loading files...";
+
+    fetch("/get_files")
+        .then(response => {
+            if (!response.ok) {
+                throw new Error(`Failed to fetch files (${response.status})`);
+            }
+            return response.json();
+        })
+        .then(renderFiles)
+        .catch(err => {
+            console.error(err);
+            if (meta) meta.textContent = "Failed to load files";
+            const tbody = document.getElementById("files-tbody");
+            if (tbody) {
+                tbody.innerHTML = '<tr><td colspan="5" class="text-danger">Unable to fetch files</td></tr>';
+            }
+        });
+}
+
 // Helper function to add list item from server data
 function addListItemToField(field, value) {
     const listElement = document.getElementById(`${field}-list`);
@@ -114,6 +187,16 @@ function disconnect() {
 
 // Refresh config on page load
 document.addEventListener('DOMContentLoaded', refreshConfig);
+document.addEventListener('DOMContentLoaded', () => {
+    // Preload files list on initial page load
+    refreshFiles();
+
+    // Refresh when the Connection tab becomes active
+    const connectionTab = document.querySelector('a.nav-link[href="#connection-tab"]');
+    if (connectionTab) {
+        connectionTab.addEventListener('shown.bs.tab', refreshFiles);
+    }
+});
 
 
 // connect to web socket to get connection status. 

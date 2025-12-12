@@ -279,15 +279,24 @@ class Device:
         if filename.startswith("_"):
             return False 
 
+        filename_lower = filename.lower()
+
         if "include_suffix" in self.m_config:
             for suffix in self.m_config["include_suffix"]:
-                if filename.endswith(suffix):
-                    return True
+                s = str(suffix).lower()
+                if s.startswith('.'):
+                    if filename_lower.endswith(s):
+                        return True
+                else:
+                    # Allow config without dot and be tolerant of case
+                    if filename_lower.endswith(s) or filename_lower.endswith("." + s):
+                        return True
             return False
         
         if "exclude_suffix" in self.m_config:
             for suffix in self.m_config["exclude_suffix"]:
-                if filename.endswith(suffix):
+                s = str(suffix).lower()
+                if filename_lower.endswith(s) or filename_lower.endswith("." + s):
                     return False
             return True
 
@@ -318,9 +327,15 @@ class Device:
             event (str): event
             msg (any): message
         """
+        count = 0
         for sio in self.server_sio.values():
             if sio and sio.connected:
+                count += 1
                 sio.emit(event, msg)
+        if count == 0:
+            debug_print(f"_emit_to_all_servers: {event} - no connected sockets. servers={list(self.server_sio.keys())}")
+        else:
+            debug_print(f"_emit_to_all_servers: {event} - sent to {count} servers")
 
     def _background_reindex(self):
         """Reindex MCAP files
@@ -360,7 +375,7 @@ class Device:
                     if not self._include(basename):
                         continue                    
 
-                    if basename.endswith(".mcap"):
+                    if basename.lower().endswith(".mcap"):
                         filename = os.path.join(root, basename)
                         if os.path.exists(filename) and os.path.getsize(filename) > 0:
                             all_files.append(filename)
@@ -456,6 +471,7 @@ class Device:
                     message_queue.put({"close": True})
 
                 self.m_files = entries
+                debug_print(f"metadata complete, files: {len(self.m_files)}")
         else:
             debug_print("No files")
 
@@ -759,8 +775,17 @@ class Device:
         """
         debug_print("enter")
 
+        if self.m_files is None or len(self.m_files) == 0:
+            debug_print("send_device_data: no files to send")
+            return
+
+        total_files = len(self.m_files)
+        debug_print(f"send_device_data files={total_files}")
+
         N = 100
         blocks = [self.m_files[i:i + N] for i in range(0, len(self.m_files), N)]
+
+        debug_print(f"send_device_data blocks={len(blocks)} block_sizes={[len(b) for b in blocks] if blocks else []}")
 
         self._update_fs_info()
 
@@ -801,6 +826,30 @@ class Device:
 
         self.m_local_dashboard_sio.start_background_task(target=self.send_device_data)
         return "Ok"
+
+    def get_files(self):
+        """Return the current scanned files for the local dashboard."""
+
+        files = self.m_files or []
+
+        # Keep newest-first ordering based on start_time when present
+        try:
+            files = sorted(
+                files,
+                key=lambda f: f.get("start_time", ""),
+                reverse=True,
+            )
+        except Exception:
+            # Sorting is best-effort; fall back to existing order
+            pass
+
+        is_scanning = bool(self.m_reindex_thread or self.m_metadata_thread or self.m_hash_thread)
+
+        return jsonify({
+            "count": len(files),
+            "files": files,
+            "scanning": is_scanning,
+        })
 
     def index(self):
         return send_from_directory("static", "index.html")
@@ -1055,8 +1104,10 @@ class Device:
         @sio.event
         def connect():
             time.sleep(0.5)
-            debug_print(f"---- connected {server_address}")
-            sio.emit('join', { 'room': self.m_config["source"], "type": "device", "session_token": session_id })                               
+            debug_print(f"---- websocket connected to {server_address}")
+            join_data = { 'room': self.m_config["source"], "type": "device", "session_token": session_id }
+            debug_print(f"emit join: {join_data}")
+            sio.emit('join', join_data)                               
 
         @sio.event
         def disconnect():
@@ -1088,12 +1139,14 @@ class Device:
 
         @sio.event
         def dashboard_info(data):
-            debug_print(data)
+            debug_print(f"dashboard_info received: {data}")
 
             self.server_sio[server_address] = sio
             self.source_to_server[source] = server_address
             self.server_to_source[server_address] = source
             
+            debug_print(f"device handshake complete: source={source}, server={server_address}, sio.connected={sio.connected}")
+            debug_print(f"server_sio dict now has {len(self.server_sio)} entries: {list(self.server_sio.keys())}")
             # source = self.server_to_source.get(server_address)
             self.m_local_dashboard_sio.emit("server_connect",  {"name": server_address, "connected": True, "source": source})
             self._background_scan()
