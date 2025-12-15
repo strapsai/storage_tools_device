@@ -5,16 +5,17 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        CONFIG_PORT: ${CONFIG_PORT}
+        CONFIG_PORT: ${STORAGE_TOOL_DEVICE_CONFIG_PORT}
       network: host 
     image: storage_tools_device
     container_name: storage_tools_device
     network_mode: host
     environment:
-      - CONFIG_PORT=${CONFIG_PORT}
-      - DATA_DIR=${DATA_DIR}
+      - STORAGE_TOOL_DEVICE_CONFIG_FILE=${STORAGE_TOOL_DEVICE_CONFIG_FILE}
+      - STORAGE_TOOL_DEVICE_CONFIG_PORT=${STORAGE_TOOL_DEVICE_CONFIG_PORT}
+      - STORAGE_TOOL_DEVICE_DATA_DIR=${STORAGE_TOOL_DEVICE_DATA_DIR}
     volumes:
-      - ${DATA_DIR}:${DATA_DIR}
+      - ${STORAGE_TOOL_DEVICE_DATA_DIR}:${STORAGE_TOOL_DEVICE_DATA_DIR}
       - ./config:/app/config
     tty: true
     stdin_open: true
