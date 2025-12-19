@@ -39,7 +39,10 @@ def create_app(config_file, salt):
 # Initialize the app only once
 if __name__ != "__main__":
     # This branch runs when the script is imported by Gunicorn
-    config_file = os.getenv("CONFIG_FILE", "config/config.yaml")
+    # Prefer new env var; fall back to legacy for compatibility
+    config_file = os.getenv("STORAGE_TOOL_DEVICE_CONFIG_FILE")
+    if not config_file:
+        raise ValueError("STORAGE_TOOL_DEVICE_CONFIG_FILE environment variable must be set (legacy: CONFIG_FILE)")
     salt = os.getenv("SALT")
     create_app(config_file, salt)
 
@@ -53,6 +56,6 @@ if __name__ == "__main__":
 
     # Run the application using the provided configuration
     create_app(args.config, args.salt)
-    port = os.environ.get("CONFIG_PORT", "8811")
+    port = os.environ.get("STORAGE_TOOL_DEVICE_CONFIG_PORT", "8811")
     port = int(port) if port else 8811
     sockethost.run(app=app, host="0.0.0.0", port=port)
