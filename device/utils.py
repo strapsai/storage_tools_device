@@ -467,10 +467,77 @@ def _getMetaDataText(filename: str) -> dict:
         }
 
 
+def _getMetaDataMarkdown(filename:str) -> dict:
+    """Extract metadata from a Markdown file
+    
+    Since Markdown files don't have embedded timestamps, we use file modification time.
+    
+    Args:
+        filename (str): Path to Markdown file
+    
+    Returns:
+        dict: A dictionary with 'start_time' and 'end_time' based on file modification time
+    """
+    formatted_date = getDateFromFilename(filename)
+    if formatted_date is None:
+        creation_date = datetime.fromtimestamp(os.path.getmtime(filename))
+        formatted_date = creation_date.strftime("%Y-%m-%d %H:%M:%S")
+    
+    return {
+        "start_time": formatted_date,
+        "end_time": formatted_date
+    }
+
+
+def _getMetaDataCSV(filename:str) -> dict:
+    """Extract metadata from a CSV file
+    
+    Since CSV files don't have embedded timestamps, we use file modification time.
+    
+    Args:
+        filename (str): Path to CSV file
+    
+    Returns:
+        dict: A dictionary with 'start_time' and 'end_time' based on file modification time
+    """
+    formatted_date = getDateFromFilename(filename)
+    if formatted_date is None:
+        creation_date = datetime.fromtimestamp(os.path.getmtime(filename))
+        formatted_date = creation_date.strftime("%Y-%m-%d %H:%M:%S")
+    
+    return {
+        "start_time": formatted_date,
+        "end_time": formatted_date
+    }
+
+
+def _getMetaDataGeneric(filename:str) -> dict:
+    """Extract metadata from an unrecognized file extension
+    
+    Provides basic metadata using file modification time as a fallback for any file type
+    that doesn't have a specialized metadata extractor.
+    
+    Args:
+        filename (str): Path to file
+    
+    Returns:
+        dict: A dictionary with 'start_time' and 'end_time' based on file modification time
+    """
+    formatted_date = getDateFromFilename(filename)
+    if formatted_date is None:
+        creation_date = datetime.fromtimestamp(os.path.getmtime(filename))
+        formatted_date = creation_date.strftime("%Y-%m-%d %H:%M:%S")
+    
+    return {
+        "start_time": formatted_date,
+        "end_time": formatted_date
+    }
+
+
 def getMetaData(filename:str, local_tz:str) -> dict:
     """Extract the metadata from a file
 
-    Handles [mcap, bag, jpg, mp4, txt, ass, png, yaml]
+    Handles [mcap, bag, jpg, mp4, txt, ass, png, yaml, md, csv, and other file types]
 
     Args:
         filename (str): _description_
@@ -478,7 +545,8 @@ def getMetaData(filename:str, local_tz:str) -> dict:
 
     Returns:
         dict: A dictionary with 'start_time' and 'end_time' in the local timezone, 
-        and 'topics' with message counts per topic if applicable. Returns `None` if file reading fails.
+        and 'topics' with message counts per topic if applicable. For unrecognized file types,
+        returns basic metadata with timestamps from file modification time. Returns `None` if file reading fails.
     """
     if filename.lower().endswith(".mcap"):
         return _getMetaDataMCAP(filename, local_tz)
@@ -496,7 +564,12 @@ def getMetaData(filename:str, local_tz:str) -> dict:
         return _getMetaDataPNG(filename)
     elif filename.lower().endswith(".yaml"):
         return _getMetaDataText(filename)
-    return {}
+    elif filename.lower().endswith(".md"):
+        return _getMetaDataMarkdown(filename)
+    elif filename.lower().endswith(".csv"):
+        return _getMetaDataCSV(filename)
+    else:
+        return _getMetaDataGeneric(filename)
 
 
 def get_ip_address_and_port(server_address:str) -> Tuple[str, str]:
