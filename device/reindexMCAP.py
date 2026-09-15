@@ -82,8 +82,9 @@ def recover_mcap(filename: str) -> Tuple[bool, str]:
     cmd = [mcap_bin, "recover", filename, "-o", recovery]
     p = subprocess.run(cmd, capture_output=True)
 
-    # verify that the file is readable. 
-    status = test_mcap_file(recovery)
+    # verify that the file is readable. `mcap recover` may exit without writing
+    # anything, so the recovery file is not guaranteed to exist.
+    status = os.path.exists(recovery) and test_mcap_file(recovery)
 
     # all good, rename the original and put the recovery file in the right place. 
     if status:
@@ -92,6 +93,8 @@ def recover_mcap(filename: str) -> Tuple[bool, str]:
         return True, "ok"
     
     # if not all good, let the user know what happened. 
-    msg = f"file: {filename}, " + p.stdout.decode("utf-8") + " " +  p.stderr.decode("utf-8")
+    if os.path.exists(recovery):
+        os.remove(recovery)
+    msg = f"file: {filename}, rc={p.returncode} " + p.stdout.decode("utf-8", errors="replace") + " " +  p.stderr.decode("utf-8", errors="replace")
     return False, msg 
 

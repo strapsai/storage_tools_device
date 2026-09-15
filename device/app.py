@@ -50,12 +50,18 @@ if __name__ == "__main__":
     # For local debugging and development
     from argparse import ArgumentParser
     parser = ArgumentParser()
-    parser.add_argument("-c", "--config", type=str, required=False, default="config/config.yaml", help="Config file for this instance")
-    parser.add_argument("-s", "--salt", type=str, required=False)
+    # Honour the same environment variables as the gunicorn/import path so
+    # `python -m device.app` behaves like the documented container entrypoint.
+    default_config = os.getenv("STORAGE_TOOL_DEVICE_CONFIG_FILE") or "config/config.yaml"
+    parser.add_argument("-c", "--config", type=str, required=False, default=default_config, help="Config file for this instance")
+    parser.add_argument("-s", "--salt", type=str, required=False, default=os.getenv("SALT"))
     args = parser.parse_args()
 
     # Run the application using the provided configuration
     create_app(args.config, args.salt)
     port = os.environ.get("STORAGE_TOOL_DEVICE_CONFIG_PORT", "8811")
     port = int(port) if port else 8811
-    sockethost.run(app=app, host="0.0.0.0", port=port)
+    # This is the documented way to run the device (entrypoint.sh: gunicorn does
+    # not play well with multiprocessing.Pool). flask-socketio >= 5.3 refuses to
+    # start Werkzeug outside debug mode unless told the choice is deliberate.
+    sockethost.run(app=app, host="0.0.0.0", port=port, allow_unsafe_werkzeug=True)

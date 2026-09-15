@@ -72,13 +72,15 @@ Two flags gate the loops: `server_can_run[addr]` (should this address be managed
 `server_should_run[addr]` (stay in the connected busy-wait). Clearing the latter drops the
 connection and lets the manager thread reconnect.
 
-Zeroconf servers are managed by a single thread that walks the discovered list — **it connects to
-at most one zeroconf server at a time**, unlike the static list which gets a thread each.
+Zeroconf servers are managed by a single long-lived thread that re-reads `config["zero_conf"]` on
+every pass (`start_zero_config_servers` only re-arms it, never spawns a second one) — **it connects
+to at most one zeroconf server at a time**, unlike the static list which gets a thread each.
 
 ## Scan pipeline
 
-`_background_scan()` starts a chain; each stage guards itself with a “already running” flag, does a
-pooled pass, and calls the next:
+`_background_scan()` starts a chain; each stage claims an “already running” flag under `scan_lock`,
+runs its `_impl` inside `try/finally` so the flag is always released (an exception in one stage is
+logged and the chain continues), does a pooled pass, and calls the next:
 
 1. **`_background_reindex`** — walk `watch:` dirs, collect `.mcap`, test-open each, and run
    `reindexMCAP.recover_mcap` on the ones that fail. Damaged MCAPs (killed recorder, power loss)
@@ -113,17 +115,22 @@ params `offset`, `cid`, `splits`. A file larger than `split_size_gb` is sent as 
 POSTs; `cid == splits` tells the server this is the final piece and it should verify size and
 rename `.tmp` into place. Reads are `chunk_size_mb` at a time.
 
-Cancellation is a `multiprocessing.Event` per server (`m_signal[server]`), set by the
-`device_cancel_transfer` event and polled between chunks and splits.
+Cancellation is a `Manager().Event()` per server (`m_signal[server]`), set by the
+`device_cancel_transfer` event and polled before every chunk read and every split. The Event only
+lives as long as that transfer's `Manager`; it is dropped from `m_signal` when the transfer ends,
+and a late cancel is ignored. `m_send_threads[server]` is the in-flight guard, so a second
+`device_send` for the same server while one is running is refused.
 
 Progress from every stage is mirrored through `MultiTargetSocketIOTQDM` to the local dashboard
 **and** every connected server, so a transfer is visible from either end.
 
 ## Deletion
 
-`device_remove` deletes files from the device after the server has them. `_removeFiles` refuses any
-path not under a configured `watch:` root — keep that guard. It removes the file plus its
-`.md5` and `.metadata` sidecars, then rescans.
+`device_remove` deletes files from the device after the server has them. `_removeFiles` resolves
+the final path (`realpath`, so symlinks and `..` count) and refuses anything not under a configured
+`watch:` root via `_path_in_watch` — keep that guard; `_on_device_send` applies the same check
+before reading anything for upload. It removes the file plus its `.md5` and `.metadata` sidecars,
+then rescans.
 
 ## Configuration (`config/config.yaml`)
 
@@ -138,17 +145,21 @@ path not under a configured `watch:` root — keep that guard. It removes the fi
 | `include_suffix` / `exclude_suffix` | File filter |
 | `threads` | Pool size for every stage, and the upload concurrency |
 | `wait_s` | Reconnect/poll interval |
-| `split_size_gb`, `chunk_size_mb` | Upload chunking |
+| `split_size_gb`, `chunk_size_mb` | Upload chunking (defaults 1 GB / 1 MB; the shipped `config.yaml` does not set them) |
+| `chunk_size` | Read size in bytes for hashing (default 8 MiB); separate from `chunk_size_mb` |
 
 The local dashboard (`/`, port from `STORAGE_TOOL_DEVICE_CONFIG_PORT`, default 8811) edits this file
-in place via `POST /save_config`, which then reacts: rescan if `watch` changed, full reconnect if
+in place via `POST /save_config`. The posted fields are merged into the running config and the
+*merged* config (minus runtime keys `source`/`zero_conf`) is written back, so keys the dashboard has
+no widget for survive a save. It then reacts: rescan if `watch` changed, full reconnect if
 `robot_name` changed, and start/stop threads for added/removed servers.
 
 ## Running
 
-`python -m device.app` reads `STORAGE_TOOL_DEVICE_CONFIG_FILE` (required) and
-`STORAGE_TOOL_DEVICE_CONFIG_PORT`. Run directly with `-c/--config` for development. The bundled
-`docker-compose.yaml` uses host networking and bind-mounts the data dir plus `./config`.
+`python -m device.app` reads `STORAGE_TOOL_DEVICE_CONFIG_FILE` (default for `-c/--config`, which
+overrides it), `SALT` (default for `-s`) and `STORAGE_TOOL_DEVICE_CONFIG_PORT`. Under gunicorn the
+env var is required. The bundled `docker-compose.yaml` uses host networking and bind-mounts the data
+dir plus `./config`.
 
 Gunicorn is deliberately **not** used: `entrypoint.sh` notes it does not play well with
 `multiprocessing.Pool`, which every scan stage depends on.
@@ -157,6 +168,9 @@ Gunicorn is deliberately **not** used: `entrypoint.sh` notes it does not play we
 
 - Emitting before `dashboard_info` arrives is a no-op. Trace connection bugs by looking for that
   event first.
+- Every `requests` call and the TCP probe carry timeouts; a wedged server fails the attempt instead
+  of pinning a thread or pool worker.
+- `zero_conf` is rebuilt (not appended to) on every zeroconf resolution.
 - The `md5` field is xxhash-128.
 - Sidecar caches are validated by mtime only; touching a file forces a full re-hash, and editing a
   sidecar without touching it will be silently kept.

@@ -110,7 +110,15 @@ def pbar_thread(messages:Queue, total_size:str, source:str, socket_events:List[T
         except ValueError:
             time.sleep(0.001)
             continue
-        
+        except (EOFError, BrokenPipeError, ConnectionError, OSError) as e:
+            # The multiprocessing.Manager that owns the queue has gone away;
+            # nothing more will arrive.
+            debug_print(f"pbar_thread: queue closed ({e}), exiting")
+            break
+
+        if not isinstance(action_msg, dict):
+            continue
+
         if "close" in action_msg:
             break
 
@@ -159,9 +167,11 @@ def pbar_thread(messages:Queue, total_size:str, source:str, socket_events:List[T
             continue 
 
     # final cleanup. Removes all managed pbars. 
-    positions = pbars.keys()
-    for position in positions:
-        pbars[position].close()
+    for pbar in list(pbars.values()):
+        try:
+            pbar.close()
+        except Exception as e:
+            debug_print(f"pbar close failed: {e}")
 
 
 
