@@ -52,10 +52,15 @@ if __name__ == "__main__":
     parser = ArgumentParser()
     # Honour the same environment variables as the gunicorn/import path so
     # `python -m device.app` behaves like the documented container entrypoint.
-    default_config = os.getenv("STORAGE_TOOL_DEVICE_CONFIG_FILE") or "config/config.yaml"
-    parser.add_argument("-c", "--config", type=str, required=False, default=default_config, help="Config file for this instance")
+    # There is deliberately no built-in default: a device that starts against
+    # the wrong config is worse than one that refuses to start.
+    parser.add_argument("-c", "--config", type=str, required=False,
+                        default=os.getenv("STORAGE_TOOL_DEVICE_CONFIG_FILE"),
+                        help="Config file for this instance (or set STORAGE_TOOL_DEVICE_CONFIG_FILE)")
     parser.add_argument("-s", "--salt", type=str, required=False, default=os.getenv("SALT"))
     args = parser.parse_args()
+    if not args.config:
+        parser.error("no config file: pass -c/--config or set STORAGE_TOOL_DEVICE_CONFIG_FILE")
 
     # Run the application using the provided configuration
     create_app(args.config, args.salt)
