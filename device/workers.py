@@ -30,13 +30,19 @@ class SendWorkerArg:
         self.read_size_b = read_size_b
 
 
-def send_worker(args):
-    if args.signal.is_set():
-        return fullpath, False
+# (connect, read) timeouts for the upload POST. The read timeout also bounds how
+# long a send() may block, so a server that stops draining the socket fails the
+# transfer instead of pinning a pool worker forever.
+UPLOAD_TIMEOUT_S = (10, 300)
 
+
+def send_worker(args):
     assert( isinstance(args, SendWorkerArg))
 
     fullpath = os.path.join(args.dirroot, args.relative_path)
+
+    if args.signal.is_set():
+        return fullpath, False
 
     if not os.path.exists(fullpath):
         debug_print(f"{fullpath} not found")
@@ -52,7 +58,10 @@ def send_worker(args):
         args.send_offsets[args.upload_id] = args.offset_b
 
         split_size_b = 1024*1024*1024*args.split_size_gb
-        splits = args.file_size // split_size_b
+        # Number of *additional* POSTs after the first. Computed on the last
+        # byte so a remainder that is an exact multiple of the split size does
+        # not produce a trailing zero-length POST.
+        splits = max(0, (args.file_size - 1) // split_size_b)
 
         params["splits"] = splits
 
@@ -63,8 +72,7 @@ def send_worker(args):
 
         def read_and_update(upload_id:str, parent:SendWorkerArg):
             read_count = 0
-            # while parent.isConnected(args.server) and not args.signal.is_set():
-            while True:
+            while not args.signal.is_set():
                 chunk = file.read(args.read_size_b)
                 if not chunk:
                     break
@@ -85,29 +93,38 @@ def send_worker(args):
         desc = "Sending " + os.path.basename(args.relative_path)
         args.message_queue.put({"child_pbar": args.name, "desc": desc, "size": args.file_size, "action": "start"})
 
-        # with requests.Session() as session:
-        for cid in range(1+splits):
+        ok = True
+        try:
+            for cid in range(1+splits):
 
-            if args.signal.is_set():
-                break
-            params["offset"] = args.send_offsets[args.upload_id]
-            params["cid"] = cid
-            # Make the POST request with the streaming data
-            response = requests.post(args.url + f"/{args.source}/{args.upload_id}", params=params, data=read_and_update(args.upload_id, args), headers=headers)
-            if response.status_code != 200:
-                debug_print(f"Error! {response.status_code} {response.content.decode()}")
-                break
+                if args.signal.is_set():
+                    ok = False
+                    break
+                params["offset"] = args.send_offsets[args.upload_id]
+                params["cid"] = cid
+                # Make the POST request with the streaming data
+                response = requests.post(args.url + f"/{args.source}/{args.upload_id}", params=params,
+                                         data=read_and_update(args.upload_id, args), headers=headers,
+                                         timeout=UPLOAD_TIMEOUT_S)
+                if response.status_code != 200:
+                    debug_print(f"Error! {response.status_code} {response.content.decode(errors='replace')}")
+                    ok = False
+                    break
+        except requests.RequestException as e:
+            debug_print(f"Upload of {fullpath} failed: {e}")
+            ok = False
+        finally:
+            args.send_offsets.pop(args.upload_id, None)
+            args.message_queue.put({"child_pbar": args.name, "action": "close"})
 
-        del args.send_offsets[args.upload_id]
-        args.message_queue.put({"child_pbar": args.name, "action": "close"})
-
-    return fullpath, True
+    return fullpath, ok
 
 
 def hash_worker(args):
         message_queue, entry, chunk_size = args
         if entry is None:
             debug_print("empty entry")
+            return None
 
         if "filename" not in entry:
             debug_print("No filename")
@@ -121,9 +138,13 @@ def hash_worker(args):
         size = os.path.getsize(filename)
         cache_name = filename + ".md5"
         if os.path.exists(cache_name) and os.path.getmtime(cache_name) > os.path.getmtime(filename):
-            entry["md5"] = json.load(open(cache_name))
-            message_queue.put({"main_pbar": size})
-            return entry
+            try:
+                with open(cache_name) as fid:
+                    entry["md5"] = json.load(fid)
+                message_queue.put({"main_pbar": size})
+                return entry
+            except (OSError, json.JSONDecodeError) as e:
+                debug_print(f"Ignoring unreadable hash cache {cache_name}: {e}")
 
         x = xxhash.xxh128()
         name = urllib.parse.quote(filename).replace("/", "_")
@@ -138,14 +159,19 @@ def hash_worker(args):
                     update = len(chunk)
                     message_queue.put({"main_pbar": update})
                     message_queue.put({"child_pbar": name, "size": update, "action": "update"})
-
-                message_queue.put({"child_pbar": name, "action": "close"})
         except Exception as e:
-            debug_print(f"Caught exception {e}")
+            # A partial digest must never be cached or reported as the file's hash.
+            debug_print(f"Hashing {filename} failed: {e}")
+            return None
+        finally:
+            message_queue.put({"child_pbar": name, "action": "close"})
 
         entry["md5"] = x.hexdigest()
-        with open(cache_name, "w") as fid:
-            json.dump(entry["md5"], fid)
+        try:
+            with open(cache_name, "w") as fid:
+                json.dump(entry["md5"], fid)
+        except OSError as e:
+            debug_print(f"Could not write hash cache {cache_name}: {e}")
 
         # debug_print(f"exit {os.path.basename(filename)}")
         return entry
@@ -188,14 +214,15 @@ def metadata_worker(args):
     metadata_filename = fullpath + ".metadata"
     if os.path.exists(metadata_filename) and (os.path.getmtime(metadata_filename) > os.path.getmtime(fullpath)):
         try:
-            device_entry = json.load(open(metadata_filename, "r"))
-            if device_entry["site"] == None:
+            with open(metadata_filename, "r") as fid:
+                device_entry = json.load(fid)
+            if device_entry.get("site") is None:
                 device_entry["site"] = "default"
             if "filename" not in device_entry:
                 device_entry["filename"] = filename
                 device_entry["dirroot"] = dirroot
             device_entry["robot_name"] = robot_name
-        except json.decoder.JSONDecodeError:
+        except (json.decoder.JSONDecodeError, OSError, KeyError):
             device_entry = create_device_entry(fullpath, filename, dirroot, size, robot_name, local_tz)
             if device_entry is None:
                 message_queue.put({"main_pbar": size})
@@ -227,11 +254,16 @@ def metadata_worker(args):
 
 def reindex_worker(args):
     message_queue, filename = args
-    size = os.path.getsize(filename)
-
-    status, msg = reindexMCAP.recover_mcap(filename)
-    if not status:
-        debug_print(msg)
+    size = 0
+    status = False
+    try:
+        size = os.path.getsize(filename)
+        status, msg = reindexMCAP.recover_mcap(filename)
+        if not status:
+            debug_print(msg)
+    except Exception as e:
+        # One unrecoverable file must not abort the whole reindex stage.
+        debug_print(f"reindex of {filename} raised: {e}")
 
     message_queue.put({"main_pbar": size})
     return filename, status
