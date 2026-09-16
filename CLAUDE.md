@@ -41,6 +41,11 @@ config/config.yaml  Device configuration (see below)
 non-loopback interface that is currently **up** and returns `DEV-<robot_name>-<hash8>`. This string
 is the device's `source` — its room name on the server, and part of every `upload_id`.
 
+The server computes `upload_id = md5(f"{source}_{project}_{content_hash}")` from the xxh128 digest
+this device reports as `md5` (protocol 2, since 1.1.0). The id does not depend on the file's path,
+so a folder moved together with its `.metadata`/`.md5` sidecars keeps its ids and is not uploaded
+again. Before 1.1.0 the path was part of the id; see the server's `docs/Migration-1.1.md`.
+
 Consequences worth knowing:
 
 - The name changes if the set of up interfaces changes (plugging in a dongle, a down link at boot).
@@ -50,6 +55,14 @@ Consequences worth knowing:
 - An optional `salt` argument (CLI `-s`) appends to the source, for running two devices on one host.
 
 ## Connection lifecycle
+
+Before opening the socket the device fetches `GET /name` from the server, which since server
+1.1.0 also returns `version` and `protocol`. If the server's protocol differs from
+`device/__version__.py:PROTOCOL_VERSION` (missing = 1, i.e. a pre-1.1.0 server) the device does
+**not** connect; it records the reason (`_report_server_error`) and the local page shows a red
+banner naming the server. The `join` message carries `version` and `protocol`; a server that
+refuses them answers `incompatible_version` and disconnects, which is shown the same way and
+stops retries for that address (`server_should_run`).
 
 Servers come from two places: the static `servers:` list in the config, and zeroconf discovery
 (service type `_http._tcp.local.`, name `Airlab_storage`, whose TXT record carries the server's
@@ -86,7 +99,10 @@ logged and the chain continues), does a pooled pass, and calls the next:
    `reindexMCAP.recover_mcap` on the ones that fail. Damaged MCAPs (killed recorder, power loss)
    are common and would otherwise yield no metadata.
 2. **`_background_metadata`** — `metadata_worker` per file. Writes `<file>.metadata` (JSON) beside
-   each file and reuses it when it is newer than the file. Extraction is per-format
+   each file and reuses it when it is newer than the file. Only what is intrinsic to the file is
+   taken from the cache; `dirroot`, `filename` and `size` are always set from where the scan found
+   the file, so moved folders report their new location (a stale cached path used to make the hash
+   stage report the file as missing). Extraction is per-format
    (`utils.getMetaData`): MCAP via `mcap.reader` (also counts messages per topic), ROS1 bags via
    `rosbags`, MP4 via `ffmpeg.probe`, JPEG via EXIF, everything else falls back to filename date
    patterns (`getDateFromFilename`) and then mtime.
