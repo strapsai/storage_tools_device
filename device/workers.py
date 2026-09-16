@@ -218,9 +218,12 @@ def metadata_worker(args):
                 device_entry = json.load(fid)
             if device_entry.get("site") is None:
                 device_entry["site"] = "default"
-            if "filename" not in device_entry:
-                device_entry["filename"] = filename
-                device_entry["dirroot"] = dirroot
+            # The sidecar caches what is intrinsic to the file (times, topics, size). Where the
+            # file lives is whatever the scan just found: a folder moved together with its
+            # sidecars must not keep reporting its old location.
+            device_entry["filename"] = filename
+            device_entry["dirroot"] = dirroot
+            device_entry["size"] = size
             device_entry["robot_name"] = robot_name
         except (json.decoder.JSONDecodeError, OSError, KeyError):
             device_entry = create_device_entry(fullpath, filename, dirroot, size, robot_name, local_tz)

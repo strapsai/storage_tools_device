@@ -30,7 +30,7 @@ from device.SocketIOTQDM import  MultiTargetSocketIOTQDM
 from device.utils import get_source_by_mac_address, pbar_thread, address_in_list
 from device.workers import SendWorkerArg, hash_worker, metadata_worker, reindex_worker, send_worker
 import device.reindexMCAP as reindexMCAP
-from device.__version__ import __version__
+from device.__version__ import __version__, PROTOCOL_VERSION
 
 
 class Device:
@@ -190,6 +190,7 @@ class Device:
         self.update_connections()
         self.m_local_dashboard_sio.emit("title", self.m_config["source"])
         self.m_local_dashboard_sio.emit("version", __version__ )
+        self.m_local_dashboard_sio.emit("server_errors", getattr(self, "m_server_errors", {}))
 
     def on_local_dashboard_disconnect(self):
         debug_print("Dashboard disconnected")
@@ -237,6 +238,18 @@ class Device:
 
     def _on_keep_alive_ack(self):
         pass
+
+    def _report_server_error(self, server_address: str, msg: str, **info) -> None:
+        """Remember and show (on the local dashboard) a per-server error, e.g. an incompatible version."""
+        if not hasattr(self, "m_server_errors"):
+            self.m_server_errors = {}
+        self.m_server_errors[server_address] = {"name": server_address, "msg": msg, "device_version": __version__,
+                                                "device_protocol": PROTOCOL_VERSION, **info}
+        self.m_local_dashboard_sio.emit("server_errors", self.m_server_errors)
+
+    def _clear_server_error(self, server_address: str) -> None:
+        if getattr(self, "m_server_errors", {}).pop(server_address, None) is not None:
+            self.m_local_dashboard_sio.emit("server_errors", self.m_server_errors)
 
     def _on_update_entry(self, data:dict):
         """Update the metadata for a given log based on the filename
@@ -1190,7 +1203,8 @@ class Device:
         def connect():
             time.sleep(0.5)
             debug_print(f"---- websocket connected to {server_address}")
-            join_data = { 'room': self.m_config["source"], "type": "device", "session_token": session_id }
+            join_data = { 'room': self.m_config["source"], "type": "device", "session_token": session_id,
+                          "version": __version__, "protocol": PROTOCOL_VERSION }
             debug_print(f"emit join: {join_data}")
             sio.emit('join', join_data)                               
 
@@ -1213,6 +1227,15 @@ class Device:
                         del self.source_to_server[source]
                 
             self.m_local_dashboard_sio.emit("server_connect",  {"name": server_address, "connected": False})
+
+        @sio.event
+        def incompatible_version(data):
+            # The server refused us (it disconnects right after). Say so on the local page and
+            # stop retrying this address until the software on one side is updated.
+            msg = data.get("msg") or f"server {server_address} runs an incompatible protocol"
+            debug_print(msg)
+            self._report_server_error(server_address, msg, server_version=data.get("server_version"), server_protocol=data.get("server_protocol"))
+            self.server_should_run[server_address] = False
 
         @sio.event
         def device_send(data):
@@ -1279,6 +1302,18 @@ class Device:
             
             msg = response.json()
             source = msg.get("source")
+
+            # Refuse an incompatible server before opening the socket. Servers before 1.1.0
+            # return no protocol at all, which counts as protocol 1.
+            server_protocol = msg.get("protocol", 1)
+            if server_protocol != PROTOCOL_VERSION:
+                text = (f"Server {server_address} ({source}) runs storage_tools_server {msg.get('version', 'before 1.1.0')} "
+                        f"(protocol {server_protocol}); this device is {__version__} (protocol {PROTOCOL_VERSION}). "
+                        f"Update the {'server' if server_protocol < PROTOCOL_VERSION else 'device'}. Not connecting.")
+                debug_print(text)
+                self._report_server_error(server_address, text, server_version=msg.get('version'), server_protocol=server_protocol)
+                return False
+            self._clear_server_error(server_address)
 
             with self.session_lock:
                 if source and source in self.source_to_server and self.source_to_server[source] != server_address:

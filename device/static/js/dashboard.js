@@ -243,6 +243,22 @@ $(document).ready(function () {
 
     });
 
+    // Per-server problems the device refuses to work through, e.g. a server on another protocol
+    // version. The whole map is sent each time; an empty map hides the banner.
+    socket.on("server_errors", function(errors) {
+        const banner = document.getElementById("server-error-banner");
+        const list = document.getElementById("server-error-list");
+        if (!banner || !list) return;
+        list.innerHTML = "";
+        const names = Object.keys(errors || {}).sort();
+        names.forEach(name => {
+            const li = document.createElement("li");
+            li.textContent = errors[name].msg;
+            list.appendChild(li);
+        });
+        banner.hidden = names.length === 0;
+    });
+
     socket.on("server_remove", function(msg) {
         server_address = msg.name;
 
