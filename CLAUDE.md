@@ -37,9 +37,15 @@ config/config.yaml  Device configuration (see below)
 
 ## Identity
 
-`get_source_by_mac_address(robot_name)` (`device/utils.py`) hashes the MAC addresses of every
-non-loopback interface that is currently **up** and returns `DEV-<robot_name>-<hash8>`. This string
-is the device's `source` — its room name on the server, and part of every `upload_id`.
+`stable_source(config, config_filename, salt)` (`device/identity.py`) returns `DEV-<robot_name>-<id>`.
+This string is the device's `source` — its room name on the server, and part of every `upload_id`.
+The `<id>` is decided once and kept: `source_id` in the config wins; otherwise `<config>.identity`
+next to the config file (or `IDENTITY_FILE`) holds it, seeded on first start from the old MAC-derived
+hash (`get_source_by_mac_address`, now used only for that seed) so an upgrade does not rename the
+device, and never rewritten. The device refuses to start if the id cannot be persisted rather than
+fall back to a name that changes. The old hash covered every interface that was up, so a dongle, a
+link down at boot, or a restarted container with new random `veth` MACs renamed the device and every
+file it had uploaded became a new identity on the server (the basestation went through four names).
 
 The server computes `upload_id = md5(f"{source}_{project}_{content_hash}")` from the xxh128 digest
 this device reports as `md5` (protocol 2, since 1.1.0). The id does not depend on the file's path,
@@ -48,11 +54,10 @@ again. Before 1.1.0 the path was part of the id; see the server's `docs/Migratio
 
 Consequences worth knowing:
 
-- The name changes if the set of up interfaces changes (plugging in a dongle, a down link at boot).
-  A device that reappears under a new name looks like a brand-new device to the server.
-- Changing `robot_name` changes `source`, so `save_config` deliberately tears down and rebuilds all
-  connections when it sees that key change.
+- Changing `robot_name` changes `source` (the id stays), so `save_config` deliberately tears down and
+  rebuilds all connections when it sees that key change.
 - An optional `salt` argument (CLI `-s`) appends to the source, for running two devices on one host.
+- `save_config` writes the whole config back, so a `source_id` set in the file survives dashboard saves.
 
 ## Connection lifecycle
 
