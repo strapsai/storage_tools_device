@@ -27,7 +27,8 @@ from zeroconf.asyncio import AsyncServiceInfo, AsyncZeroconf
 
 from device.debug_print import debug_print
 from device.SocketIOTQDM import  MultiTargetSocketIOTQDM
-from device.utils import get_source_by_mac_address, pbar_thread, address_in_list
+from device.identity import stable_source
+from device.utils import pbar_thread, address_in_list
 from device.workers import SendWorkerArg, hash_worker, metadata_worker, reindex_worker, send_worker
 import device.reindexMCAP as reindexMCAP
 from device.__version__ import __version__, PROTOCOL_VERSION
@@ -51,15 +52,12 @@ class Device:
             self.m_config = yaml.safe_load(f)
             debug_print(json.dumps(self.m_config, indent=True))
 
-        robot_name = self.m_config.get("robot_name", "robot")
-        self.m_config["source"] = get_source_by_mac_address(robot_name)
+        self.m_salt = salt
+        self.m_config["source"] = stable_source(self.m_config, filename, salt)
         self.m_config["servers"] = self.m_config.get("servers", [])
         self.m_computeMD5 = self.m_config.get("computeMD5", True)
         self.m_chunk_size = self.m_config.get("chunk_size", 8192*1024)
         self.m_local_tz = self.m_config.get("local_tz", "America/New_York")
-
-        if salt:
-            self.m_config["source"] += str(salt)
 
         self.m_signal = {} # server address -> Event(). Signals when to cancel a transfer
         self.m_fs_info = {}
@@ -988,9 +986,7 @@ class Device:
         os.chmod(self.m_config_filename, 0o777 )
 
         if reconnect:
-            robot_name = self.m_config["robot_name"]
-            
-            self.m_config["source"] = get_source_by_mac_address(robot_name)
+            self.m_config["source"] = stable_source(self.m_config, self.m_config_filename, self.m_salt)
             self.m_local_dashboard_sio.emit("title", self.m_config["source"])
 
             self.disconnect_all()
