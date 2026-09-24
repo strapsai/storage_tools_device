@@ -50,12 +50,23 @@ if __name__ == "__main__":
     # For local debugging and development
     from argparse import ArgumentParser
     parser = ArgumentParser()
-    parser.add_argument("-c", "--config", type=str, required=False, default="config/config.yaml", help="Config file for this instance")
-    parser.add_argument("-s", "--salt", type=str, required=False)
+    # Honour the same environment variables as the gunicorn/import path so
+    # `python -m device.app` behaves like the documented container entrypoint.
+    # There is deliberately no built-in default: a device that starts against
+    # the wrong config is worse than one that refuses to start.
+    parser.add_argument("-c", "--config", type=str, required=False,
+                        default=os.getenv("STORAGE_TOOL_DEVICE_CONFIG_FILE"),
+                        help="Config file for this instance (or set STORAGE_TOOL_DEVICE_CONFIG_FILE)")
+    parser.add_argument("-s", "--salt", type=str, required=False, default=os.getenv("SALT"))
     args = parser.parse_args()
+    if not args.config:
+        parser.error("no config file: pass -c/--config or set STORAGE_TOOL_DEVICE_CONFIG_FILE")
 
     # Run the application using the provided configuration
     create_app(args.config, args.salt)
     port = os.environ.get("STORAGE_TOOL_DEVICE_CONFIG_PORT", "8811")
     port = int(port) if port else 8811
-    sockethost.run(app=app, host="0.0.0.0", port=port)
+    # This is the documented way to run the device (entrypoint.sh: gunicorn does
+    # not play well with multiprocessing.Pool). flask-socketio >= 5.3 refuses to
+    # start Werkzeug outside debug mode unless told the choice is deliberate.
+    sockethost.run(app=app, host="0.0.0.0", port=port, allow_unsafe_werkzeug=True)

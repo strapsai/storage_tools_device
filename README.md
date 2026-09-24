@@ -67,6 +67,21 @@ You must update all *Required* fields.
 * **Include Suffix**: The list of included suffixes.  Any file in the Watch directory (see above) that matches one of these suffixes will be uploaded to the server.
 * **Watch Interval**: How long to wait in seconds before attempting to connect to server again.
 
+#### Device identity
+
+The device introduces itself to servers as `DEV-<Robot Name>-<id>`. The `<id>` is chosen once, on
+first start, and remembered in `<config>.identity` next to the config file (or wherever `IDENTITY_FILE`
+points), so the name survives restarts, dongles and interface changes. To pick it yourself, add to the
+config file:
+
+```yaml
+source_id: bs01     # letters, digits and dots only
+```
+
+Do not change the id casually: the server keys every file this device uploaded by it, so a new id makes
+all of them look new (the server still recognises them at their on-disk path as long as they were not
+moved there). Changing **Robot Name** changes the name too, but keeps the id.
+
 Press [Save] to commit the changes to the device.  
 
 Press [Refresh] to refesh the page with the on device settings.

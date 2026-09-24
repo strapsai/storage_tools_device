@@ -12,6 +12,11 @@
 # name of the platform  
 robot_name: "my_robot_name"
 
+# Optional: fixed id in this device's source name (DEV-<robot_name>-<id>).
+# Letters, digits and dots only. When unset, an id is generated once and kept in
+# <this file without extension>.identity (or IDENTITY_FILE).
+# source_id: bs01
+
 # API key to log into the server
 API_KEY_TOKEN: cbea87b419c09982
 

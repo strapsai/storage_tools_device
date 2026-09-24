@@ -11,6 +11,7 @@ import socketio
 import socketio.exceptions
 import sys
 import time
+import traceback
 import uuid 
 import yaml
 
@@ -26,10 +27,11 @@ from zeroconf.asyncio import AsyncServiceInfo, AsyncZeroconf
 
 from device.debug_print import debug_print
 from device.SocketIOTQDM import  MultiTargetSocketIOTQDM
-from device.utils import get_source_by_mac_address, pbar_thread, address_in_list
+from device.identity import stable_source
+from device.utils import pbar_thread, address_in_list
 from device.workers import SendWorkerArg, hash_worker, metadata_worker, reindex_worker, send_worker
 import device.reindexMCAP as reindexMCAP
-from device.__version__ import __version__
+from device.__version__ import __version__, PROTOCOL_VERSION
 
 
 class Device:
@@ -50,15 +52,12 @@ class Device:
             self.m_config = yaml.safe_load(f)
             debug_print(json.dumps(self.m_config, indent=True))
 
-        robot_name = self.m_config.get("robot_name", "robot")
-        self.m_config["source"] = get_source_by_mac_address(robot_name)
+        self.m_salt = salt
+        self.m_config["source"] = stable_source(self.m_config, filename, salt)
         self.m_config["servers"] = self.m_config.get("servers", [])
         self.m_computeMD5 = self.m_config.get("computeMD5", True)
         self.m_chunk_size = self.m_config.get("chunk_size", 8192*1024)
         self.m_local_tz = self.m_config.get("local_tz", "America/New_York")
-
-        if salt:
-            self.m_config["source"] += str(salt)
 
         self.m_signal = {} # server address -> Event(). Signals when to cancel a transfer
         self.m_fs_info = {}
@@ -84,6 +83,8 @@ class Device:
         self.browser = ServiceBrowser(self.m_zeroconfig.zeroconf, services, handlers=[self._zero_config_on_change])
 
         self.session_lock = Lock()
+        self.scan_lock = Lock()   # guards the scan-stage "already running" flags
+        self.m_zero_conf_thread = None  # the single thread that manages zeroconf servers
         self.server_threads = {}  # Stores threads for each server
         self.server_can_run = {}  # Stores the "can run" flag for each server
         self.server_sessions = {}  # Stores session ID for each server
@@ -105,16 +106,19 @@ class Device:
     ## Zero Config
     async def _resolve_service_info(self, zeroconf: AsyncZeroconf, service_type: str, name: str):
         info = AsyncServiceInfo(service_type, name)
-        if await info.async_request(zeroconf, 3000):
-            addresses = [
-                f"{addr}:{cast(int, info.port)}" for addr in info.parsed_scoped_addresses()
-            ]
-            properties = {k.decode('utf-8'): v.decode('utf-8') if isinstance(v, bytes) else v for k, v in info.properties.items()}
+        if not await info.async_request(zeroconf, 3000):
+            debug_print(f"zeroconf: could not resolve {name}")
+            return
 
-            source = properties.get("source", None)
-            if source is None: 
-                return
-            debug_print( f"source is: {source}")
+        addresses = [
+            f"{addr}:{cast(int, info.port)}" for addr in info.parsed_scoped_addresses()
+        ]
+        properties = {k.decode('utf-8'): v.decode('utf-8') if isinstance(v, bytes) else v for k, v in info.properties.items()}
+
+        source = properties.get("source", None)
+        if source is None: 
+            return
+        debug_print( f"source is: {source}")
 
         self.m_config["zero_conf"] = []
 
@@ -156,14 +160,25 @@ class Device:
             self.m_local_dashboard_sio.start_background_task(self.run_async_task, zeroconf, service_type, name)
 
     def start_zero_config_servers(self):
+        """(Re)arm the zeroconf-discovered servers.
+
+        Marks every discovered address runnable and makes sure exactly one
+        manager thread exists. The manager reads the live ``zero_conf`` list on
+        every pass, so calling this again after a new discovery is enough; it
+        never spawns a second thread.
+        """
         server_list = self.m_config.get("zero_conf", [])
 
         for server_address in server_list:
             self.server_can_run[server_address] = True
             self.server_should_run[server_address] = True
 
-        thread = Thread(target=self.manage_zero_conf_connection, args=(server_list,))
+        if self.m_zero_conf_thread is not None and self.m_zero_conf_thread.is_alive():
+            return
+
+        thread = Thread(target=self.manage_zero_conf_connection, daemon=True)
         thread.start()
+        self.m_zero_conf_thread = thread
 
 
     ## Local dashboard callbacks
@@ -173,6 +188,7 @@ class Device:
         self.update_connections()
         self.m_local_dashboard_sio.emit("title", self.m_config["source"])
         self.m_local_dashboard_sio.emit("version", __version__ )
+        self.m_local_dashboard_sio.emit("server_errors", getattr(self, "m_server_errors", {}))
 
     def on_local_dashboard_disconnect(self):
         debug_print("Dashboard disconnected")
@@ -209,11 +225,29 @@ class Device:
             server_address (str): Calling server
         """
         debug_print((data, server_address))
-        if server_address in self.m_signal:
-            self.m_signal[server_address].set()
+        signal = self.m_signal.get(server_address)
+        if signal is None:
+            return
+        try:
+            signal.set()
+        except Exception as e:
+            # transfer already finished and its Manager is gone
+            debug_print(f"cancel for {server_address} ignored: {e}")
 
     def _on_keep_alive_ack(self):
         pass
+
+    def _report_server_error(self, server_address: str, msg: str, **info) -> None:
+        """Remember and show (on the local dashboard) a per-server error, e.g. an incompatible version."""
+        if not hasattr(self, "m_server_errors"):
+            self.m_server_errors = {}
+        self.m_server_errors[server_address] = {"name": server_address, "msg": msg, "device_version": __version__,
+                                                "device_protocol": PROTOCOL_VERSION, **info}
+        self.m_local_dashboard_sio.emit("server_errors", self.m_server_errors)
+
+    def _clear_server_error(self, server_address: str) -> None:
+        if getattr(self, "m_server_errors", {}).pop(server_address, None) is not None:
+            self.m_local_dashboard_sio.emit("server_errors", self.m_server_errors)
 
     def _on_update_entry(self, data:dict):
         """Update the metadata for a given log based on the filename
@@ -300,6 +334,35 @@ class Device:
                     return False
             return True
 
+    def _path_in_watch(self, path:str) -> bool:
+        """True if ``path`` resolves to somewhere inside a configured watch root.
+
+        Used to refuse server-issued delete/send requests that point outside the
+        directories this device is responsible for. Symlinks are resolved first,
+        so ``..`` tricks and links out of the tree are rejected too.
+        """
+        try:
+            real = os.path.realpath(path)
+        except Exception:
+            return False
+        for watch in self.m_config.get("watch", []):
+            root = os.path.realpath(watch)
+            try:
+                if os.path.commonpath([real, root]) == root:
+                    return True
+            except ValueError:
+                # different drives / mixed absolute+relative
+                continue
+        return False
+
+    def _claim_scan_stage(self, flag_name:str) -> bool:
+        """Atomically set a scan-stage flag. Returns False if it was already set."""
+        with self.scan_lock:
+            if getattr(self, flag_name) is not None:
+                return False
+            setattr(self, flag_name, True)
+            return True
+
     def _remove_dirpath(self, filename:str):
         """Strips dirpath from a filename
 
@@ -328,7 +391,7 @@ class Device:
             msg (any): message
         """
         count = 0
-        for sio in self.server_sio.values():
+        for sio in list(self.server_sio.values()):
             if sio and sio.connected:
                 count += 1
                 sio.emit(event, msg)
@@ -346,17 +409,23 @@ class Device:
         * Reindex in multiprocessing.Pool via reindex_worker()  
         * call background_metadata on completion.   
         """
-        if self.m_reindex_thread is not None:
+        if not self._claim_scan_stage("m_reindex_thread"):
             debug_print("already reindexing")
             return 
-        
-        # placeholder to keep the other threads out
-        self.m_reindex_thread = True 
 
+        try:
+            self._background_reindex_impl()
+        except Exception as e:
+            debug_print(f"reindex stage failed: {e}\n{traceback.format_exc()}")
+        finally:
+            self.m_reindex_thread = None
+        self._background_metadata()
+
+    def _background_reindex_impl(self):
         all_files = []
         event = "device_status_tqdm"
         socket_events = [(self.m_local_dashboard_sio, event, None)]
-        for sio in self.server_sio.values():
+        for sio in list(self.server_sio.values()):
             if sio and sio.connected:
                 socket_events.append((sio, event, None))
         bad_files = []
@@ -364,7 +433,6 @@ class Device:
 
         source = self.m_config["source"]
         max_threads = self.m_config["threads"]
-        message_queue = queue.Queue()
         desc = "reindex"
 
         self._emit_to_all_servers("device_status", {"source": self.m_config["source"], "msg": "Scanning for files", "room": self.m_config["source"]})
@@ -377,17 +445,24 @@ class Device:
 
                     if basename.lower().endswith(".mcap"):
                         filename = os.path.join(root, basename)
-                        if os.path.exists(filename) and os.path.getsize(filename) > 0:
-                            all_files.append(filename)
+                        try:
+                            if os.path.getsize(filename) > 0:
+                                all_files.append(filename)
+                        except OSError:
+                            # vanished between the walk and the stat
+                            continue
                             
         debug_print(f"Scan complete, with {len(all_files)}")
         self._emit_to_all_servers("device_status", {"source": self.m_config["source"], "room": self.m_config["source"]})        
 
         with MultiTargetSocketIOTQDM(total=len(all_files), desc="Scanning files", position=0, leave=False, source=self.m_config["source"], socket_events=socket_events) as main_pbar:
             for fullpath in all_files:
-                if not reindexMCAP.test_mcap_file(fullpath):
-                    bad_files.append(fullpath)
-                    total_size += os.path.getsize(fullpath)
+                try:
+                    if not reindexMCAP.test_mcap_file(fullpath):
+                        bad_files.append(fullpath)
+                        total_size += os.path.getsize(fullpath)
+                except OSError as e:
+                    debug_print(f"skipping {fullpath}: {e}")
                 main_pbar.update()
         
         if len(bad_files) > 0:
@@ -404,9 +479,7 @@ class Device:
                             repaired_files.append((name, status))
                 finally:
                     message_queue.put({"close": True})
-
-        self.m_reindex_thread = None
-        self._background_metadata()
+                    thread.join(timeout=5)
 
     def _background_metadata(self):
         """Generate metadata for each file.  
@@ -418,15 +491,23 @@ class Device:
         """
 
         debug_print("enter")
-        if self.m_metadata_thread is not None:
+        if not self._claim_scan_stage("m_metadata_thread"):
             debug_print("already doing metadata scan")
             return 
-        self.m_metadata_thread = True 
 
+        try:
+            self._background_metadata_impl()
+        except Exception as e:
+            debug_print(f"metadata stage failed: {e}\n{traceback.format_exc()}")
+        finally:
+            self.m_metadata_thread = None
+        self._background_hash()
+
+    def _background_metadata_impl(self):
         all_files = []
         event = "device_status_tqdm"
         socket_events = [(self.m_local_dashboard_sio, event, None)]
-        for sio in self.server_sio.values():
+        for sio in list(self.server_sio.values()):
             if sio and sio.connected:
                 socket_events.append((sio, event, None))
         total_size = 0
@@ -443,11 +524,13 @@ class Device:
                     if not self._include(basename):
                         continue
                     
-                    filename = os.path.join(root, basename).replace(dirroot, "")
-                    filename = filename.strip("/")
                     fullpath = os.path.join(root, basename)
+                    filename = os.path.relpath(fullpath, dirroot).strip("/")
+                    try:
+                        total_size += os.path.getsize(fullpath)
+                    except OSError:
+                        continue
                     all_files.append((dirroot, filename, fullpath))
-                    total_size += os.path.getsize(fullpath)
 
         self._emit_to_all_servers("device_status", {"source": self.m_config["source"], "room": self.m_config["source"]})        
 
@@ -469,14 +552,13 @@ class Device:
                                 entries.append(entry)                                
                 finally:
                     message_queue.put({"close": True})
+                    thread.join(timeout=5)
 
                 self.m_files = entries
                 debug_print(f"metadata complete, files: {len(self.m_files)}")
         else:
             debug_print("No files")
-
-        self.m_metadata_thread = None
-        self._background_hash()
+            self.m_files = []
 
     def _background_hash(self):
         """Generate the hash for each file
@@ -486,28 +568,34 @@ class Device:
         * Genenerate hash in multiprocessing.Pool via hash_worker()
         * Call emitFiles() on completion. 
         """
-        if self.m_hash_thread is not None:
-            debug_print("Already doing hash creation")
-            return 
-        
         if self.m_files is None or len(self.m_files) == 0:
             debug_print("No files")
             return 
-            
-        self.m_hash_thread = True 
-        # debug_print(self.m_files[0])
+
+        if not self._claim_scan_stage("m_hash_thread"):
+            debug_print("Already doing hash creation")
+            return 
+
+        try:
+            self._background_hash_impl()
+        except Exception as e:
+            debug_print(f"hash stage failed: {e}\n{traceback.format_exc()}")
+        finally:
+            self.m_hash_thread = None
+        self.emitFiles()
+
+    def _background_hash_impl(self):
         entries = self.m_files.copy()
 
         event = "device_status_tqdm"
         socket_events = [(self.m_local_dashboard_sio, event, None)]
-        for sio in self.server_sio.values():
+        for sio in list(self.server_sio.values()):
             if sio and sio.connected:
                 socket_events.append((sio, event, None))
         total_size = 0
 
         source = self.m_config["source"]
         max_threads = self.m_config["threads"]
-        message_queue = queue.Queue()
         desc = "Get File Hash"
 
         with Manager() as manager:
@@ -534,11 +622,9 @@ class Device:
                             entries.append(entry)
             finally:
                 message_queue.put({"close": True})
+                thread.join(timeout=5)
 
         self.m_files = entries
-        self.m_hash_thread = None
-
-        self.emitFiles()
 
     def _background_scan(self):
         """Wrapper to run file scan in background
@@ -569,13 +655,31 @@ class Device:
             filelist (list): List of files. 
         """
 
-        if self.m_send_threads.get(server, None) is not None:
-            debug_print(f"Already getting file for {server}")
-            return 
-
         if len(filelist) == 0:
             debug_print(f"No files from {server}")
             return 
+
+        with self.session_lock:
+            if self.m_send_threads.get(server, None) is not None:
+                debug_print(f"Already getting file for {server}")
+                return 
+            self.m_send_threads[server] = True
+
+        try:
+            self._background_send_files_impl(server, filelist)
+        except Exception as e:
+            debug_print(f"send to {server} failed: {e}\n{traceback.format_exc()}")
+        finally:
+            self.m_send_threads[server] = None
+            # the Event lived inside the Manager that just shut down; a later
+            # cancel must not try to touch it.
+            self.m_signal.pop(server, None)
+
+        sio = self.server_sio.get(server)
+        if sio and sio.connected:
+            sio.emit("estimate_runs", {"source": self.m_config["source"]})
+
+    def _background_send_files_impl(self, server:str, filelist:list):
 
         url = f"http://{server}/file"
         source = self.m_config["source"]
@@ -589,7 +693,7 @@ class Device:
         # send message to each connected server. 
         event = "device_status_tqdm"
         socket_events = [(self.m_local_dashboard_sio, event, None)]
-        for sio in self.server_sio.values():
+        for sio in list(self.server_sio.values()):
             if sio and sio.connected:
                 socket_events.append((sio, event, None))
         total_size = 0
@@ -625,18 +729,7 @@ class Device:
                             break
                 finally:
                     message_queue.put({"close": True})
-
-            self.m_signal[server].clear()
-
-        # done 
-        self.m_send_threads[server] = None 
-
-
-        sio = self.server_sio.get(server)
-        if sio and sio.connected:
-            sio.emit("estimate_runs", {"source": self.m_config["source"]})
-
-        pass 
+                    thread.join(timeout=5)
 
     def _update_fs_info(self):
         """Update the fs_info (filesystem info) for each watch directory
@@ -684,8 +777,17 @@ class Device:
         source = data.get("source")
         if source != self.m_config["source"]:
             return
-        files = data.get("files")
-        self.m_local_dashboard_sio.start_background_task(self._background_send_files, server, files)
+        files = data.get("files") or []
+
+        # Only ever read from inside the watch roots, whatever the server asks for.
+        allowed = []
+        for item in files:
+            dirroot, relative_path = item[0], item[1]
+            if self._path_in_watch(os.path.join(dirroot, relative_path)):
+                allowed.append(item)
+            else:
+                debug_print(f"Refusing to send {dirroot}/{relative_path}: outside watch roots")
+        self.m_local_dashboard_sio.start_background_task(self._background_send_files, server, allowed)
 
     def isConnected(self, server: str) -> bool:
         """Check if there is a connection to the named server
@@ -696,8 +798,8 @@ class Device:
         Returns:
             bool: True if the connection is active, False if not
         """
-        connected = server in self.server_sio and self.server_can_run[server] and self.server_sio[server].connected        
-        return connected
+        sio = self.server_sio.get(server)
+        return bool(sio and self.server_can_run.get(server, False) and sio.connected)
 
 
     def on_device_remove(self, data:dict):
@@ -727,16 +829,12 @@ class Device:
         for item in files:
             dirroot, file, upload_id = item
 
-            valid_dirroot = False
-            for watch in self.m_config["watch"]:
-                if watch in dirroot:
-                    valid_dirroot = True 
-            if not valid_dirroot:
+            fullpath = os.path.join(dirroot, file)
+            if not self._path_in_watch(fullpath):
                 # something is wrong!  This isn't in the watch directory
                 # skipping this file so we don't accidently delete something important!
                 debug_print(f"Not deleting {item}, it is not in my watch list")
                 continue
-            fullpath = os.path.join(dirroot, file)
 
             if os.path.exists(fullpath):
                 debug_print(f"Removing {fullpath}")
@@ -878,15 +976,17 @@ class Device:
                 
             debug_print("updated config")
 
+            # Persist the merged config, not just the fields the dashboard posted,
+            # so keys it has no widget for (split_size_gb, exclude_suffix, ...)
+            # survive a save. Runtime-only keys are never written.
+            to_save = {k: v for k, v in self.m_config.items() if k not in ("source", "zero_conf")}
             with open(self.m_config_filename, "w") as f:
-                yaml.dump(config, f)
+                yaml.dump(to_save, f)
 
         os.chmod(self.m_config_filename, 0o777 )
 
         if reconnect:
-            robot_name = self.m_config["robot_name"]
-            
-            self.m_config["source"] = get_source_by_mac_address(robot_name)
+            self.m_config["source"] = stable_source(self.m_config, self.m_config_filename, self.m_salt)
             self.m_local_dashboard_sio.emit("title", self.m_config["source"])
 
             self.disconnect_all()
@@ -999,8 +1099,8 @@ class Device:
         A connections message maps the server_address to (state:bool, name of source)
         """
         connections = {}
-        for server_address in self.server_can_run:
-            if  not self.server_can_run[server_address]:
+        for server_address, can_run in list(self.server_can_run.items()):
+            if not can_run:
                 continue 
             sio = self.server_sio.get(server_address, None)
             source = self.server_to_source.get(server_address, "None")
@@ -1008,28 +1108,22 @@ class Device:
 
         self.m_local_dashboard_sio.emit("server_connections", connections)
 
-    def manage_zero_conf_connection(self, server_list:List[str]):
-        """Manage connections to a list of zeroconf provided servers
+    def manage_zero_conf_connection(self):
+        """Manage connections to the zeroconf provided servers
 
-        For each server name in the list
-          Check to see if that server can be run. If not, sleep for "wait_s" and try something else.
-          Test the connections, and check for duplications
+        Loops forever over the live ``config["zero_conf"]`` list. For each
+        address that is still allowed to run, test the connection (which blocks
+        while connected) and mark duplicates as not runnable. Addresses that
+        are not runnable are skipped, not treated as a reason to stop.
 
-          
         NOTE: This will only connect to a single zeroconf server at a time! 
-            
-        Args:
-            server_list (List[str]): list of servers provided by zeroconf
         """
-
-        can_run = True 
-        while can_run:
+        while True:
+            server_list = list(self.m_config.get("zero_conf", []))
             for server_address in server_list:
                 if not self.server_can_run.get(server_address, False):
-                    can_run = False
-                    time.sleep(self.m_config["wait_s"])
-                    break 
-                 
+                    continue
+
                 try:
                     if self.server_should_run.get(server_address, False):
                        none_dup =  self.test_connection(server_address, "manage_zero_conf")
@@ -1105,7 +1199,8 @@ class Device:
         def connect():
             time.sleep(0.5)
             debug_print(f"---- websocket connected to {server_address}")
-            join_data = { 'room': self.m_config["source"], "type": "device", "session_token": session_id }
+            join_data = { 'room': self.m_config["source"], "type": "device", "session_token": session_id,
+                          "version": __version__, "protocol": PROTOCOL_VERSION }
             debug_print(f"emit join: {join_data}")
             sio.emit('join', join_data)                               
 
@@ -1128,6 +1223,15 @@ class Device:
                         del self.source_to_server[source]
                 
             self.m_local_dashboard_sio.emit("server_connect",  {"name": server_address, "connected": False})
+
+        @sio.event
+        def incompatible_version(data):
+            # The server refused us (it disconnects right after). Say so on the local page and
+            # stop retrying this address until the software on one side is updated.
+            msg = data.get("msg") or f"server {server_address} runs an incompatible protocol"
+            debug_print(msg)
+            self._report_server_error(server_address, msg, server_version=data.get("server_version"), server_protocol=data.get("server_protocol"))
+            self.server_should_run[server_address] = False
 
         @sio.event
         def device_send(data):
@@ -1183,16 +1287,29 @@ class Device:
             server, port = server_address.split(":")
             port = int(port)
             debug_print(f"Testing to {server}:{port}")
-            socket.create_connection((server, port))
+            with socket.create_connection((server, port), timeout=5):
+                pass
             url = f"http://{server}:{port}/name"
 
-            response = requests.get(url, headers=headers)
+            response = requests.get(url, headers=headers, timeout=10)
             if response.status_code != 200:
                 debug_print(f"Failed to fetch source name from {url} with error code {response.status_code} {response.content.decode('utf-8')}")
                 return False
             
             msg = response.json()
             source = msg.get("source")
+
+            # Refuse an incompatible server before opening the socket. Servers before 1.1.0
+            # return no protocol at all, which counts as protocol 1.
+            server_protocol = msg.get("protocol", 1)
+            if server_protocol != PROTOCOL_VERSION:
+                text = (f"Server {server_address} ({source}) runs storage_tools_server {msg.get('version', 'before 1.1.0')} "
+                        f"(protocol {server_protocol}); this device is {__version__} (protocol {PROTOCOL_VERSION}). "
+                        f"Update the {'server' if server_protocol < PROTOCOL_VERSION else 'device'}. Not connecting.")
+                debug_print(text)
+                self._report_server_error(server_address, text, server_version=msg.get('version'), server_protocol=server_protocol)
+                return False
+            self._clear_server_error(server_address)
 
             with self.session_lock:
                 if source and source in self.source_to_server and self.source_to_server[source] != server_address:
@@ -1202,19 +1319,24 @@ class Device:
                     duplicated = True
                     return False 
 
-                debug_print("Connecting....")
-                sio.connect(f"http://{server}:{port}/socket.io", headers=headers, transports=['websocket'])
-                debug_print(f"Connected to {server_address}")
+            # Connect outside the lock: the disconnect handler needs it and can
+            # fire from the client thread while connect() is still running.
+            debug_print("Connecting....")
+            sio.connect(f"http://{server}:{port}/socket.io", headers=headers, transports=['websocket'])
+            debug_print(f"Connected to {server_address}")
 
+            with self.session_lock:
                 self.server_sio[server_address] = sio
                 self.source_to_server[source] = server_address
                 self.server_to_source[server_address] = source
                 debug_print(self.server_to_source)
 
-
-        except socketio.exceptions.ConnectionError as e:
+        except (socketio.exceptions.ConnectionError, requests.RequestException, OSError) as e:
             debug_print(f"Failed to connect to {server_address} because {e} {e.args}")
-            sio.disconnect()
+            try:
+                sio.disconnect()
+            except Exception:
+                pass
             return True
 
         while self.server_can_run.get(server_address, False) and self.server_should_run.get(server_address, False):
@@ -1226,7 +1348,7 @@ class Device:
         try:
             sio.disconnect()
         except Exception as e:
-            debug_print(f"Caught {e.what()} when trying to disconnect")
+            debug_print(f"Caught {e} when trying to disconnect")
 
         return True
 
