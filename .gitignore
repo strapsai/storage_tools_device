@@ -37,3 +37,4 @@ scratch/app.py
 scratch/templates/index.html
 device/scratch_mt.py
 profile_out.prof
+config/*.identity
