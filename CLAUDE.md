@@ -110,7 +110,11 @@ logged and the chain continues), does a pooled pass, and calls the next:
    stage report the file as missing). Extraction is per-format
    (`utils.getMetaData`): MCAP via `mcap.reader` (also counts messages per topic), ROS1 bags via
    `rosbags`, MP4 via `ffmpeg.probe`, JPEG via EXIF, everything else falls back to filename date
-   patterns (`getDateFromFilename`) and then mtime. A file whose metadata cannot be read is skipped and logged
+   patterns (`getDateFromFilename`) and then mtime. **All times are written in the config's
+   `local_tz`**, never the process's zone: the container runs in UTC, and mtime dates used to land
+   a recording's `metadata.yaml`/images/logs in the next day's folder after 20:00 EDT
+   (`mtime_as_local`). Sidecars record `time_zone`; an older one is re-dated once, without
+   re-reading MCAP/bag files, whose times were already in `local_tz`. A file whose metadata cannot be read is skipped and logged
    (`metadata_worker` never raises: `imap_unordered` would re-raise in the parent and abort the
    whole stage, leaving the device with no files). An MCAP with a damaged chunk keeps the per-topic
    counts from its summary.
