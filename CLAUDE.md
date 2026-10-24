@@ -110,7 +110,10 @@ logged and the chain continues), does a pooled pass, and calls the next:
    stage report the file as missing). Extraction is per-format
    (`utils.getMetaData`): MCAP via `mcap.reader` (also counts messages per topic), ROS1 bags via
    `rosbags`, MP4 via `ffmpeg.probe`, JPEG via EXIF, everything else falls back to filename date
-   patterns (`getDateFromFilename`) and then mtime.
+   patterns (`getDateFromFilename`) and then mtime. A file whose metadata cannot be read is skipped and logged
+   (`metadata_worker` never raises: `imap_unordered` would re-raise in the parent and abort the
+   whole stage, leaving the device with no files). An MCAP with a damaged chunk keeps the per-topic
+   counts from its summary.
 3. **`_background_hash`** — `hash_worker` per file, **xxhash‑128** cached in `<file>.md5`. Note the
    field is named `md5` throughout both repos for historical reasons; it is not MD5. Cache is
    trusted when newer than the file.

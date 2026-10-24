@@ -204,6 +204,20 @@ def create_device_entry(fullpath, filename, dirroot, size, robot_name, local_tz)
 
 def metadata_worker(args):
     message_queue, dirroot, filename, fullpath, robot_name, local_tz, updates = args
+    try:
+        return _metadata_worker(message_queue, dirroot, filename, fullpath, robot_name, local_tz, updates)
+    except Exception as e:
+        # One unreadable file must not abort the stage: imap_unordered re-raises a worker's
+        # exception in the parent, and the device would then list no files at all.
+        debug_print(f"Skipping {fullpath}: metadata failed: {type(e).__name__}: {e}")
+        try:
+            message_queue.put({"main_pbar": os.path.getsize(fullpath)})
+        except OSError:
+            pass
+        return None
+
+
+def _metadata_worker(message_queue, dirroot, filename, fullpath, robot_name, local_tz, updates):
 
     if not os.path.exists(fullpath):
         message_queue.put({"main_pbar": 1})
