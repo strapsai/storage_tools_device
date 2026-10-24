@@ -119,7 +119,10 @@ logged and the chain continues), does a pooled pass, and calls the next:
    100 entries each. The server reassembles by counting block ids.
 
 `_include()` decides membership: files starting with `.` or `_` are always skipped; otherwise
-`include_suffix` (allow-list, if present) wins over `exclude_suffix` (deny-list).
+`include_suffix` (allow-list, if present) wins over `exclude_suffix` (deny-list). Before that,
+both walks (reindex and metadata) prune `exclude_dirs` (`device/dirfilter.py`), so an excluded
+tree is never entered. That matters for MinIO data dirs: one directory per object, millions of
+them, and none of their files would pass `_include()` anyway.
 
 `self.m_updates` holds server-pushed corrections (`update_entry` event, e.g. an operator fixing a
 robot name or site in the dashboard); `metadata_worker` merges them into the sidecar so the change
@@ -149,7 +152,7 @@ Progress from every stage is mirrored through `MultiTargetSocketIOTQDM` to the l
 
 `device_remove` deletes files from the device after the server has them. `_removeFiles` resolves
 the final path (`realpath`, so symlinks and `..` count) and refuses anything not under a configured
-`watch:` root via `_path_in_watch` — keep that guard; `_on_device_send` applies the same check
+`watch:` root, or under an `exclude_dirs` directory, via `_path_in_watch` — keep that guard; `_on_device_send` applies the same check
 before reading anything for upload. It removes the file plus its `.md5` and `.metadata` sidecars,
 then rescans.
 
@@ -164,6 +167,7 @@ then rescans.
 | `servers` | Static `host:port` list; zeroconf is used in addition |
 | `local_tz` | Timezone for converting recorded UTC timestamps; validated at startup |
 | `include_suffix` / `exclude_suffix` | File filter |
+| `exclude_dirs` | Directories never walked, sent from or deleted in (globs; see `device/dirfilter.py`) |
 | `threads` | Pool size for every stage, and the upload concurrency |
 | `wait_s` | Reconnect/poll interval |
 | `split_size_gb`, `chunk_size_mb` | Upload chunking (defaults 1 GB / 1 MB; the shipped `config.yaml` does not set them) |
@@ -172,7 +176,7 @@ then rescans.
 The local dashboard (`/`, port from `STORAGE_TOOL_DEVICE_CONFIG_PORT`, default 8811) edits this file
 in place via `POST /save_config`. The posted fields are merged into the running config and the
 *merged* config (minus runtime keys `source`/`zero_conf`) is written back, so keys the dashboard has
-no widget for survive a save. It then reacts: rescan if `watch` changed, full reconnect if
+no widget for survive a save. It then reacts: rescan if `watch` or `exclude_dirs` changed, full reconnect if
 `robot_name` changed, and start/stop threads for added/removed servers.
 
 ## Running
