@@ -26,6 +26,7 @@ from zeroconf import ServiceBrowser, ServiceStateChange
 from zeroconf.asyncio import AsyncServiceInfo, AsyncZeroconf
 
 from device.debug_print import debug_print
+from device import dirfilter
 from device.SocketIOTQDM import  MultiTargetSocketIOTQDM
 from device.identity import stable_source
 from device.utils import pbar_thread, address_in_list
@@ -58,6 +59,7 @@ class Device:
         self.m_computeMD5 = self.m_config.get("computeMD5", True)
         self.m_chunk_size = self.m_config.get("chunk_size", 8192*1024)
         self.m_local_tz = self.m_config.get("local_tz", "America/New_York")
+        self.m_exclude_dirs = dirfilter.compile_patterns(self.m_config.get("exclude_dirs"))
 
         self.m_signal = {} # server address -> Event(). Signals when to cancel a transfer
         self.m_fs_info = {}
@@ -335,7 +337,8 @@ class Device:
             return True
 
     def _path_in_watch(self, path:str) -> bool:
-        """True if ``path`` resolves to somewhere inside a configured watch root.
+        """True if ``path`` resolves to somewhere inside a configured watch root,
+        and not under an ``exclude_dirs`` directory.
 
         Used to refuse server-issued delete/send requests that point outside the
         directories this device is responsible for. Symlinks are resolved first,
@@ -349,7 +352,8 @@ class Device:
             root = os.path.realpath(watch)
             try:
                 if os.path.commonpath([real, root]) == root:
-                    return True
+                    rel = os.path.relpath(real, root)
+                    return not dirfilter.under_excluded(self.m_exclude_dirs, watch, os.path.join(watch, rel))
             except ValueError:
                 # different drives / mixed absolute+relative
                 continue
@@ -438,7 +442,8 @@ class Device:
         self._emit_to_all_servers("device_status", {"source": self.m_config["source"], "msg": "Scanning for files", "room": self.m_config["source"]})
         for dirroot in self.m_config["watch"]:
             self._emit_to_all_servers("device_status", {"source": self.m_config["source"], "msg": f"Scanning {dirroot} for files", "room": self.m_config["source"]})
-            for root, _, files in os.walk(dirroot):
+            for root, dirs, files in os.walk(dirroot):
+                dirfilter.prune(self.m_exclude_dirs, dirroot, root, dirs)
                 for basename in files:
                     if not self._include(basename):
                         continue                    
@@ -519,7 +524,8 @@ class Device:
         self._emit_to_all_servers("device_status", {"source": self.m_config["source"], "msg": "Scanning for files", "room": self.m_config["source"]})
         for dirroot in self.m_config["watch"]:
             self._emit_to_all_servers("device_status", {"source": self.m_config["source"], "msg": f"Scanning {dirroot} for files", "room": self.m_config["source"]})
-            for root, _, files in os.walk(dirroot):
+            for root, dirs, files in os.walk(dirroot):
+                dirfilter.prune(self.m_exclude_dirs, dirroot, root, dirs)
                 for basename in files:
                     if not self._include(basename):
                         continue
@@ -967,13 +973,14 @@ class Device:
             for key in config:
                 if key in self.m_config:
                     if self.m_config[key] != config[key]:
-                        if key == "watch":
+                        if key in ("watch", "exclude_dirs"):
                             rescan = True
                         if key == "robot_name":
                             reconnect = True
 
                     self.m_config[key] = config[key]
                 
+            self.m_exclude_dirs = dirfilter.compile_patterns(self.m_config.get("exclude_dirs"))
             debug_print("updated config")
 
             # Persist the merged config, not just the fields the dashboard posted,
