@@ -61,6 +61,7 @@ You must update all *Required* fields.
 * **Robot Name**: (Required) Name of this robot. This should be unique within the project.
 * **API Key Token**: (Required) The API_KEY_TOKEN for this robot. Your admin can provide this to you. If you are running your own upload server, it is set in the Config->Keys page.
 * **Watch**: (Required) The list of directories to be watched.  Any file with a matching suffix (see Include Suffix) will be uploaded. These all must be in the same subdirectory as `DATA_DIR` from the `config.env` file.
+* **Exclude Dirs** (`exclude_dirs`, config file only): Directories inside the watch roots that are never walked, for example a MinIO or database data directory. Each entry is a glob matched per path component: a bare name (`minio`) matches at any depth, a relative path (`chiron_backup/sessions/*/minio`) is anchored at the watch root, and an absolute path (`/logging/chiron_data`) is matched as the device sees it. Files under an excluded directory are not listed, sent or deleted.
 * **Servers**:  List of potential servers.  If this is empty, the Device will search for servers using ZeroConf.
 * **Local Time Zone**: The time zone that the logs were recorded in.
 * **Threads**: The number of threads used for uploading from this device to the server.

@@ -24,6 +24,13 @@ API_KEY_TOKEN: cbea87b419c09982
 watch:
   - /mnt/data/project
 
+# Optional: directories never to walk, e.g. a MinIO or database data dir inside a watch root.
+# Glob per path component. A bare name matches at any depth; a relative path is from the
+# watch root; an absolute path is as the device sees it. Files inside are never sent or deleted.
+# exclude_dirs:
+#   - chiron_data
+#   - chiron_backup/sessions/*/minio
+
 
 # Timezone used when converting UTC to local time
 local_tz: "America/New_York"
