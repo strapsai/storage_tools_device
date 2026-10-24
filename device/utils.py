@@ -280,6 +280,17 @@ def getDateFromFilename(full_filename:str):
     return None
 
 
+def mtime_as_local(filename: str, local_tz: str) -> str:
+    """The file's modification time as "YYYY-MM-DD HH:MM:SS" in local_tz.
+
+    The same zone MCAP and bag times are written in, so every file of a recording gets the same
+    date. Not the process's own zone: the device container runs in UTC, which put a recording's
+    metadata.yaml, images and logs in the next day's folder after 20:00 EDT.
+    """
+    instant = datetime.fromtimestamp(os.path.getmtime(filename), tz=timezone.utc)
+    return instant.astimezone(pytz.timezone(local_tz)).strftime("%Y-%m-%d %H:%M:%S")
+
+
 def _getMetaDataMCAP(filename: str, local_tz:str) -> dict:
     """
     Extracts metadata from an MCAP file, including message count by topic, 
@@ -397,7 +408,7 @@ def _getMetaDataJPEG(filename: str) -> dict:
             rtn["end_time"] = timestamp_str
     return rtn
 
-def _getMetaDataMP4(filename: str) -> dict:
+def _getMetaDataMP4(filename: str, local_tz: str) -> dict:
     """Extracts the metadata for an MP4 video file
 
     Args:
@@ -422,8 +433,11 @@ def _getMetaDataMP4(filename: str) -> dict:
             creation_time = probe["streams"][0]["tags"]["creation_time"]
         duration = float(probe['format']['duration'])
         
-        # Convert creation time to datetime object
+        # Convert creation time to datetime object. The container's creation_time is UTC; a date
+        # from the file name is already local and has no zone.
         creation_datetime = datetime.fromisoformat(creation_time.replace('Z', '+00:00'))
+        if creation_datetime.tzinfo is not None:
+            creation_datetime = creation_datetime.astimezone(pytz.timezone(local_tz))
         
         # Calculate end time by adding duration
         end_datetime = creation_datetime + timedelta(seconds=duration)
@@ -438,7 +452,7 @@ def _getMetaDataMP4(filename: str) -> dict:
         # invalid file!
         return None
 
-def _getMetaDataPNG(filename:str) -> dict:
+def _getMetaDataPNG(filename: str, local_tz: str) -> dict:
     """Reads the timestamp from a PNG file
 
     * First tries to extract from filename
@@ -450,11 +464,7 @@ def _getMetaDataPNG(filename:str) -> dict:
     Returns:
         dict: A dictionary with 'start_time' and 'end_time' the file's time zone 
     """
-    formatted_date =  getDateFromFilename(filename)
-    if formatted_date is None:
-
-        creation_date = datetime.fromtimestamp(os.path.getmtime(filename))
-        formatted_date = creation_date.strftime("%Y-%m-%d %H:%M:%S")
+    formatted_date = getDateFromFilename(filename) or mtime_as_local(filename, local_tz)
 
     return {
         "start_time": formatted_date,
@@ -462,7 +472,7 @@ def _getMetaDataPNG(filename:str) -> dict:
         }
 
 
-def _getMetaDataText(filename: str) -> dict:
+def _getMetaDataText(filename: str, local_tz: str) -> dict:
     """Reads the timestamp from a TEXT file
 
     * First tries to extract from filename
@@ -475,11 +485,7 @@ def _getMetaDataText(filename: str) -> dict:
         dict: A dictionary with 'start_time' and 'end_time' the file's time zone 
     """
     # have to use the file time for this one
-    formatted_date =  getDateFromFilename(filename)
-    if formatted_date is None:
-
-        creation_date = datetime.fromtimestamp(os.path.getmtime(filename))
-        formatted_date = creation_date.strftime("%Y-%m-%d %H:%M:%S")
+    formatted_date = getDateFromFilename(filename) or mtime_as_local(filename, local_tz)
 
     return {
         "start_time": formatted_date,
@@ -487,7 +493,7 @@ def _getMetaDataText(filename: str) -> dict:
         }
 
 
-def _getMetaDataMarkdown(filename:str) -> dict:
+def _getMetaDataMarkdown(filename: str, local_tz: str) -> dict:
     """Extract metadata from a Markdown file
     
     Since Markdown files don't have embedded timestamps, we use file modification time.
@@ -498,10 +504,7 @@ def _getMetaDataMarkdown(filename:str) -> dict:
     Returns:
         dict: A dictionary with 'start_time' and 'end_time' based on file modification time
     """
-    formatted_date = getDateFromFilename(filename)
-    if formatted_date is None:
-        creation_date = datetime.fromtimestamp(os.path.getmtime(filename))
-        formatted_date = creation_date.strftime("%Y-%m-%d %H:%M:%S")
+    formatted_date = getDateFromFilename(filename) or mtime_as_local(filename, local_tz)
     
     return {
         "start_time": formatted_date,
@@ -509,7 +512,7 @@ def _getMetaDataMarkdown(filename:str) -> dict:
     }
 
 
-def _getMetaDataCSV(filename:str) -> dict:
+def _getMetaDataCSV(filename: str, local_tz: str) -> dict:
     """Extract metadata from a CSV file
     
     Since CSV files don't have embedded timestamps, we use file modification time.
@@ -520,10 +523,7 @@ def _getMetaDataCSV(filename:str) -> dict:
     Returns:
         dict: A dictionary with 'start_time' and 'end_time' based on file modification time
     """
-    formatted_date = getDateFromFilename(filename)
-    if formatted_date is None:
-        creation_date = datetime.fromtimestamp(os.path.getmtime(filename))
-        formatted_date = creation_date.strftime("%Y-%m-%d %H:%M:%S")
+    formatted_date = getDateFromFilename(filename) or mtime_as_local(filename, local_tz)
     
     return {
         "start_time": formatted_date,
@@ -531,7 +531,7 @@ def _getMetaDataCSV(filename:str) -> dict:
     }
 
 
-def _getMetaDataGeneric(filename:str) -> dict:
+def _getMetaDataGeneric(filename: str, local_tz: str) -> dict:
     """Extract metadata from an unrecognized file extension
     
     Provides basic metadata using file modification time as a fallback for any file type
@@ -543,10 +543,7 @@ def _getMetaDataGeneric(filename:str) -> dict:
     Returns:
         dict: A dictionary with 'start_time' and 'end_time' based on file modification time
     """
-    formatted_date = getDateFromFilename(filename)
-    if formatted_date is None:
-        creation_date = datetime.fromtimestamp(os.path.getmtime(filename))
-        formatted_date = creation_date.strftime("%Y-%m-%d %H:%M:%S")
+    formatted_date = getDateFromFilename(filename) or mtime_as_local(filename, local_tz)
     
     return {
         "start_time": formatted_date,
@@ -575,21 +572,21 @@ def getMetaData(filename:str, local_tz:str) -> dict:
     elif filename.lower().endswith(".jpg"):
         return _getMetaDataJPEG(filename)
     elif filename.lower().endswith(".mp4"):
-        return _getMetaDataMP4(filename)
+        return _getMetaDataMP4(filename, local_tz)
     elif filename.lower().endswith(".txt"):
-        return _getMetaDataText(filename)
+        return _getMetaDataText(filename, local_tz)
     elif filename.lower().endswith(".ass"):
-        return _getMetaDataText(filename)
+        return _getMetaDataText(filename, local_tz)
     elif filename.lower().endswith(".png"):
-        return _getMetaDataPNG(filename)
+        return _getMetaDataPNG(filename, local_tz)
     elif filename.lower().endswith(".yaml"):
-        return _getMetaDataText(filename)
+        return _getMetaDataText(filename, local_tz)
     elif filename.lower().endswith(".md"):
-        return _getMetaDataMarkdown(filename)
+        return _getMetaDataMarkdown(filename, local_tz)
     elif filename.lower().endswith(".csv"):
-        return _getMetaDataCSV(filename)
+        return _getMetaDataCSV(filename, local_tz)
     else:
-        return _getMetaDataGeneric(filename)
+        return _getMetaDataGeneric(filename, local_tz)
 
 
 def get_ip_address_and_port(server_address:str) -> Tuple[str, str]:

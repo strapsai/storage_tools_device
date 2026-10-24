@@ -19,7 +19,8 @@ class Location(unittest.TestCase):
             fh.write("hello")
         # A sidecar written when the file lived under recA/, with the intrinsic fields cached.
         stale = {"dirroot": root, "filename": "recA/notes.txt", "size": 5, "start_time": "2026-09-15 10:00:00",
-                 "end_time": "2026-09-15 10:00:00", "site": "default", "robot_name": "old", "md5": None, "topics": {}}
+                 "end_time": "2026-09-15 10:00:00", "site": "default", "robot_name": "old", "md5": None, "topics": {},
+                 "time_zone": "UTC"}   # current format; pre-time_zone sidecars are re-dated once (test_local_tz)
         with open(f + ".metadata", "w") as fh:
             json.dump(stale, fh)
         os.utime(f + ".metadata", None)   # newer than the file, so it is used as cache

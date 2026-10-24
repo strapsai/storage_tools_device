@@ -4,11 +4,10 @@ import urllib
 import requests
 import xxhash
 
-from datetime import datetime
 
 import device.reindexMCAP as reindexMCAP
 from device.debug_print import debug_print
-from device.utils import getDateFromFilename, getMetaData
+from device.utils import getDateFromFilename, getMetaData, mtime_as_local
 
 
 class SendWorkerArg:
@@ -181,10 +180,7 @@ def create_device_entry(fullpath, filename, dirroot, size, robot_name, local_tz)
     if metadata is None:
         return None
 
-    formatted_date = getDateFromFilename(fullpath)
-    if formatted_date is None:
-        creation_date = datetime.fromtimestamp(os.path.getmtime(fullpath))
-        formatted_date = creation_date.strftime("%Y-%m-%d %H:%M:%S")
+    formatted_date = getDateFromFilename(fullpath) or mtime_as_local(fullpath, local_tz)
     start_time = metadata.get("start_time", formatted_date)
     end_time = metadata.get("end_time", formatted_date)
 
@@ -199,6 +195,33 @@ def create_device_entry(fullpath, filename, dirroot, size, robot_name, local_tz)
         "md5": None
     }
     device_entry.update(metadata)
+    device_entry["time_zone"] = local_tz
+    return device_entry
+
+
+# Types whose times come from their own content (message timestamps), already written in local_tz.
+_CONTENT_TIMED = (".mcap", ".bag")
+
+
+def _restamp_times(device_entry, fullpath, filename, dirroot, size, robot_name, local_tz):
+    """Bring a cached sidecar's times into local_tz.
+
+    Sidecars written before "time_zone" was recorded dated every file that is not an MCAP or bag
+    by its modification time in the container's zone (UTC). Those are recomputed, which is cheap
+    (a stat, an EXIF or ffprobe read). MCAP and bag times were already converted to local_tz, so
+    they are only stamped, never re-read. A sidecar from a different local_tz is rebuilt in full.
+    """
+    cached_zone = device_entry.get("time_zone")
+    if cached_zone == local_tz:
+        return device_entry
+    if cached_zone is None and fullpath.lower().endswith(_CONTENT_TIMED):
+        device_entry["time_zone"] = local_tz
+        return device_entry
+    fresh = create_device_entry(fullpath, filename, dirroot, size, robot_name, local_tz)
+    if fresh is None:
+        return device_entry
+    for key in ("start_time", "end_time", "time_zone"):
+        device_entry[key] = fresh[key]
     return device_entry
 
 
@@ -239,6 +262,7 @@ def _metadata_worker(message_queue, dirroot, filename, fullpath, robot_name, loc
             device_entry["dirroot"] = dirroot
             device_entry["size"] = size
             device_entry["robot_name"] = robot_name
+            device_entry = _restamp_times(device_entry, fullpath, filename, dirroot, size, robot_name, local_tz)
         except (json.decoder.JSONDecodeError, OSError, KeyError):
             device_entry = create_device_entry(fullpath, filename, dirroot, size, robot_name, local_tz)
             if device_entry is None:
