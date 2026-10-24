@@ -1,4 +1,4 @@
-const configFields = ["watch", "servers", "include_suffix"];
+const configFields = ["watch", "servers", "include_suffix", "bundle_dirs"];
 
 
 document.addEventListener("DOMContentLoaded", function() {
@@ -18,14 +18,7 @@ document.addEventListener("DOMContentLoaded", function() {
 function addListItem(field) {
     const newItem = document.getElementById(`new-${field}-item`).value.trim();
     if (newItem) {
-        const listElement = document.getElementById(`${field}-list`);
-        const itemElement = document.createElement("div");
-        itemElement.className = "input-group mb-1";
-        itemElement.innerHTML = `
-            <input type="text" class="form-control" value="${newItem}" readonly>
-            <button class="btn btn-danger" onclick="removeListItem(this)">&#128465;</button>
-        `;
-        listElement.appendChild(itemElement);
+        addListItemToField(field, newItem);
         document.getElementById(`new-${field}-item`).value = ""; // Clear input field
     }
 }
@@ -46,6 +39,8 @@ function saveConfig() {
         servers: getListItems('servers'),
         threads: parseInt(document.getElementById("threads").value),
         include_suffix: getListItems('include_suffix'),
+        bundle_dirs: getListItems('bundle_dirs'),
+        bundle_settle_s: parseInt(document.getElementById("bundle_settle_s").value),
         wait_s: parseInt(document.getElementById("wait_s").value)
     };
 
@@ -53,11 +48,13 @@ function saveConfig() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(config)
-    }).then(response => {
+    }).then(async response => {
         if (response.ok) {
             alert("Configuration saved successfully!");
         } else {
-            alert("Failed to save configuration.");
+            let detail = "";
+            try { detail = (await response.json()).message || ""; } catch (e) { /* not JSON */ }
+            alert("Failed to save configuration." + (detail ? "\n" + detail : ""));
         }
     });
 }
@@ -82,6 +79,7 @@ function refreshConfig() {
             document.getElementById("local_tz").value = config.local_tz || "";
             document.getElementById("threads").value = config.threads || 4;
             document.getElementById("wait_s").value = config.wait_s || 2;
+            document.getElementById("bundle_settle_s").value = config.bundle_settle_s ?? 600;
             document.getElementById("split_size_gb").value = config.split_size_gb || 2;
             document.getElementById("read_size_mb").value = config.read_size_mb || 2;
 
@@ -170,13 +168,21 @@ function refreshFiles() {
 
 // Helper function to add list item from server data
 function addListItemToField(field, value) {
+    // Built with DOM calls, not innerHTML: a regex may contain quotes or angle brackets.
     const listElement = document.getElementById(`${field}-list`);
     const itemElement = document.createElement("div");
     itemElement.className = "input-group mb-1";
-    itemElement.innerHTML = `
-        <input type="text" class="form-control" value="${value}" readonly>
-        <button class="btn btn-danger" onclick="removeListItem(this)">&#128465;</button>
-    `;
+    const input = document.createElement("input");
+    input.type = "text";
+    input.className = field === "bundle_dirs" ? "form-control font-monospace" : "form-control";
+    input.value = value;
+    input.readOnly = true;
+    const button = document.createElement("button");
+    button.className = "btn btn-danger";
+    button.innerHTML = "&#128465;";
+    button.onclick = function () { removeListItem(this); };
+    itemElement.appendChild(input);
+    itemElement.appendChild(button);
     listElement.appendChild(itemElement);
 }
 

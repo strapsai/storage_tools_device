@@ -31,6 +31,14 @@ watch:
 #   - chiron_data
 #   - chiron_backup/sessions/*/minio
 
+# Optional: folders uploaded as one .tar each ("Folder Bundles" on the dashboard). Python regexes
+# matched against the whole folder name. The scan does not enter a matching folder: everything in
+# it, whatever its suffix, is uploaded inside <folder>.<hash8>.tar. A folder is bundled once nothing
+# in it changed for bundle_settle_s seconds; a later change uploads a new version.
+# bundle_dirs:
+#   - '\d{4}(_\d{2}){5}\.tmux'      # tmux pane-log runs, tmux/2026_10_24_03_10_58.tmux/
+# bundle_settle_s: 600
+
 
 # Timezone used when converting UTC to local time
 local_tz: "America/New_York"

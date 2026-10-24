@@ -8,10 +8,11 @@ import xxhash
 import device.reindexMCAP as reindexMCAP
 from device.debug_print import debug_print
 from device.utils import getDateFromFilename, getMetaData, mtime_as_local
+from device import bundles
 
 
 class SendWorkerArg:
-    def __init__(self, message_queue, dirroot, relative_path, upload_id, offset_b, file_size, signal, server, send_offsets, split_size_gb, api_key_token, name, url, source, read_size_b) -> None:
+    def __init__(self, message_queue, dirroot, relative_path, upload_id, offset_b, file_size, signal, server, send_offsets, split_size_gb, api_key_token, name, url, source, read_size_b, bundle_folder=None) -> None:
         self.message_queue = message_queue
         self.dirroot = dirroot
         self.relative_path = relative_path
@@ -27,6 +28,8 @@ class SendWorkerArg:
         self.url = url
         self.source = source
         self.read_size_b = read_size_b
+        # Set when relative_path is `<folder>.tar` for a bundle folder: the tar is streamed.
+        self.bundle_folder = bundle_folder
 
 
 # (connect, read) timeouts for the upload POST. The read timeout also bounds how
@@ -43,11 +46,12 @@ def send_worker(args):
     if args.signal.is_set():
         return fullpath, False
 
-    if not os.path.exists(fullpath):
+    if args.bundle_folder is None and not os.path.exists(fullpath):
         debug_print(f"{fullpath} not found")
         return fullpath, False
 
-    with open(fullpath, 'rb') as file:
+    opener = (lambda: bundles.BundleReader(args.bundle_folder)) if args.bundle_folder else (lambda: open(fullpath, 'rb'))
+    with opener() as file:
         params = {}
         if args.offset_b > 0:
             file.seek(args.offset_b)
@@ -128,6 +132,9 @@ def hash_worker(args):
         if "filename" not in entry:
             debug_print("No filename")
             return entry
+
+        if entry.get("is_bundle"):
+            return bundles.hash_entry(entry, message_queue, chunk_size)
 
         filename = os.path.join(entry["dirroot"], entry["filename"])
         if not os.path.exists(filename):

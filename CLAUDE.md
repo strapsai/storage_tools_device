@@ -131,6 +131,22 @@ both walks (reindex and metadata) prune `exclude_dirs` (`device/dirfilter.py`), 
 tree is never entered. That matters for MinIO data dirs: one directory per object, millions of
 them, and none of their files would pass `_include()` anyway.
 
+**Folder bundles** (`device/bundles.py`). Both walks stop at a folder whose name fullmatches a
+`bundle_dirs` regex; the metadata walk records it as one entry, `<folder>.tar` (flag `is_bundle`).
+- The tar is generated as a stream that depends only on the folder's contents: sorted members,
+  uid/gid 0, no user names, whole-second mtimes, GNU format for long names. `iter_tar` gives
+  exactly what `tarfile` writes; `tar_size` computes its length from the headers.
+- The hash stage hashes that stream, and the upload sends it (`BundleReader`); nothing is written
+  to disk.
+- The fingerprint (path, size, mtime_ns of every member) lives in `<folder>.tar.md5` and
+  `<folder>.tar.metadata` beside the folder, one pair per folder.
+- After hashing, `filename` becomes `<folder>.<hash8>.tar`. A changed folder is a new file on the
+  server; without the version it would hit the old tar's path, which the server reports present
+  (layout-path fallback) and refuses to overwrite (409).
+- Folders changed within `bundle_settle_s` are skipped for that scan.
+- `device_remove` deletes the folder only if its fingerprint is still the hashed one and the name
+  still matches.
+
 `self.m_updates` holds server-pushed corrections (`update_entry` event, e.g. an operator fixing a
 robot name or site in the dashboard); `metadata_worker` merges them into the sidecar so the change
 survives the next scan.
@@ -175,6 +191,7 @@ then rescans.
 | `local_tz` | Timezone for converting recorded UTC timestamps; validated at startup |
 | `include_suffix` / `exclude_suffix` | File filter |
 | `exclude_dirs` | Directories never walked, sent from or deleted in (globs; see `device/dirfilter.py`) |
+| `bundle_dirs`, `bundle_settle_s` | Folder-name regexes (whole name); a match is one `<folder>.<hash8>.tar` (see below) |
 | `threads` | Pool size for every stage, and the upload concurrency |
 | `wait_s` | Reconnect/poll interval |
 | `split_size_gb`, `chunk_size_mb` | Upload chunking (defaults 1 GB / 1 MB; the shipped `config.yaml` does not set them) |
