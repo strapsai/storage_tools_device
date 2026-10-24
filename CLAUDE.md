@@ -186,6 +186,14 @@ overrides it), `SALT` (default for `-s`) and `STORAGE_TOOL_DEVICE_CONFIG_PORT`. 
 env var is required. The bundled `docker-compose.yaml` uses host networking and bind-mounts the data
 dir plus `./config`.
 
+**In airlab_ws** (the fleet machines) the image is not where the code comes from. The
+`storage-tools-device` service (`launch/storage-tools/docker-compose-x86-device.yaml`) bind-mounts
+`$AIRLAB_PATH` and runs `python3 -m device.app` from
+`$AIRLAB_PATH/storage_tools_ws/storage_tools_device` (`launch/storage-tools/device-basestation.yaml`).
+The image only provides Python and the packages. So a code change rolls out by updating that checkout
+and restarting the container. Rebuild the image only when `requirements.txt` changes. That checkout
+is pinned in airlab_ws `version_control/storage_tools.yaml`, and it tracks `master`, not `dev`.
+
 Gunicorn is deliberately **not** used: `entrypoint.sh` notes it does not play well with
 `multiprocessing.Pool`, which every scan stage depends on.
 
@@ -201,5 +209,5 @@ Gunicorn is deliberately **not** used: `entrypoint.sh` notes it does not play we
   sidecar without touching it will be silently kept.
 - `_include` returns `None` (falsy) when neither suffix list is configured — effectively excluding
   everything. Always configure one.
-- Metadata and hash stages both walk the tree independently; a file appearing between them is
+- Reindex and metadata stages both walk the tree independently (hash reuses the metadata list); a file appearing between them is
   handled on the next scan, not this one.
