@@ -26,7 +26,7 @@ from zeroconf import ServiceBrowser, ServiceStateChange
 from zeroconf.asyncio import AsyncServiceInfo, AsyncZeroconf
 
 from device.debug_print import debug_print
-from device import dirfilter
+from device import bundles, dirfilter
 from device.SocketIOTQDM import  MultiTargetSocketIOTQDM
 from device.identity import stable_source
 from device.utils import pbar_thread, address_in_list
@@ -60,6 +60,10 @@ class Device:
         self.m_chunk_size = self.m_config.get("chunk_size", 8192*1024)
         self.m_local_tz = self.m_config.get("local_tz", "America/New_York")
         self.m_exclude_dirs = dirfilter.compile_patterns(self.m_config.get("exclude_dirs"))
+        # Present even when empty, so a dashboard save (which only stores known keys) keeps it.
+        self.m_config.setdefault("bundle_dirs", [])
+        self.m_config.setdefault("bundle_settle_s", bundles.DEFAULT_SETTLE_S)
+        self._compile_bundles()
 
         self.m_signal = {} # server address -> Event(). Signals when to cancel a transfer
         self.m_fs_info = {}
@@ -336,6 +340,21 @@ class Device:
                     return False
             return True
 
+    def _compile_bundles(self):
+        """Compile bundle_dirs (folder-name regexes, whole-name match). Invalid ones are logged and
+        left out; save_config refuses them up front."""
+        self.m_bundle_dirs, errors = bundles.compile_patterns(self.m_config.get("bundle_dirs"))
+        for pattern, error in errors:
+            debug_print(f"bundle_dirs: ignoring invalid pattern {pattern!r}: {error}")
+        self.m_bundle_settle_s = int(self.m_config.get("bundle_settle_s", bundles.DEFAULT_SETTLE_S))
+
+    def _bundle_folder(self, fullpath: str):
+        """The folder behind `<folder>.tar` if it is a bundle under the current patterns, else None."""
+        folder = bundles.bundle_dir(fullpath)
+        if folder and bundles.matches(self.m_bundle_dirs, os.path.basename(folder)):
+            return folder
+        return None
+
     def _path_in_watch(self, path:str) -> bool:
         """True if ``path`` resolves to somewhere inside a configured watch root,
         and not under an ``exclude_dirs`` directory.
@@ -444,6 +463,8 @@ class Device:
             self._emit_to_all_servers("device_status", {"source": self.m_config["source"], "msg": f"Scanning {dirroot} for files", "room": self.m_config["source"]})
             for root, dirs, files in os.walk(dirroot):
                 dirfilter.prune(self.m_exclude_dirs, dirroot, root, dirs)
+                # A bundle's contents are plain bytes of its tar: no MCAP in it is touched.
+                dirs[:] = [d for d in dirs if not bundles.matches(self.m_bundle_dirs, d)]
                 for basename in files:
                     if not self._include(basename):
                         continue                    
@@ -510,6 +531,7 @@ class Device:
 
     def _background_metadata_impl(self):
         all_files = []
+        bundle_tasks = []
         event = "device_status_tqdm"
         socket_events = [(self.m_local_dashboard_sio, event, None)]
         for sio in list(self.server_sio.values()):
@@ -526,6 +548,12 @@ class Device:
             self._emit_to_all_servers("device_status", {"source": self.m_config["source"], "msg": f"Scanning {dirroot} for files", "room": self.m_config["source"]})
             for root, dirs, files in os.walk(dirroot):
                 dirfilter.prune(self.m_exclude_dirs, dirroot, root, dirs)
+                for d in [d for d in dirs if bundles.matches(self.m_bundle_dirs, d)]:
+                    folder = os.path.join(root, d)
+                    if os.path.islink(folder):
+                        continue
+                    bundle_tasks.append((dirroot, os.path.relpath(folder, dirroot) + bundles.SUFFIX, folder))
+                dirs[:] = [d for d in dirs if not bundles.matches(self.m_bundle_dirs, d)]
                 for basename in files:
                     if not self._include(basename):
                         continue
@@ -539,8 +567,10 @@ class Device:
                     all_files.append((dirroot, filename, fullpath))
 
         self._emit_to_all_servers("device_status", {"source": self.m_config["source"], "room": self.m_config["source"]})        
+        if bundle_tasks:
+            debug_print(f"{len(bundle_tasks)} bundle folders")
 
-        if len(all_files) > 0:
+        if len(all_files) > 0 or bundle_tasks:
             with Manager() as manager:
                 robot_name = self.m_config.get("robot_name", None)
                 message_queue = manager.Queue()
@@ -548,6 +578,8 @@ class Device:
                 entries = []
 
                 pool_queue = [ (message_queue, dirroot, filename, fullpath, robot_name, self.m_local_tz, updates) for (dirroot, filename, fullpath) in all_files ]
+                bundle_queue = [ (message_queue, dirroot, filename, folder, robot_name, self.m_local_tz, updates, self.m_bundle_settle_s)
+                                 for (dirroot, filename, folder) in bundle_tasks ]
                 thread = Thread(target=pbar_thread, args=(message_queue, total_size, source, socket_events, desc, max_threads))    
                 thread.start()
 
@@ -556,6 +588,9 @@ class Device:
                         for entry in pool.imap_unordered(metadata_worker, pool_queue):
                             if entry:
                                 entries.append(entry)                                
+                        for entry in pool.imap_unordered(bundles.metadata_worker, bundle_queue):
+                            if entry:
+                                entries.append(entry)
                 finally:
                     message_queue.put({"close": True})
                     thread.join(timeout=5)
@@ -612,7 +647,9 @@ class Device:
                     continue
 
                 filename = os.path.join(entry["dirroot"], entry["filename"])
-                if os.path.exists(filename):
+                if entry.get("is_bundle"):
+                    total_size += entry.get("size", 0)
+                elif os.path.exists(filename):
                     total_size += os.path.getsize(filename)
                 
             pool_queue = [ (message_queue, entry, self.m_chunk_size) for entry in entries ]
@@ -720,7 +757,8 @@ class Device:
                 signal = self.m_signal[server]
                 args = SendWorkerArg(message_queue, dirroot, relative_path, upload_id, 
                                      offset_b, file_size, signal, server, shared_offsets, 
-                                     split_size_gb, api_key_token, name, url, source, read_size_b)
+                                     split_size_gb, api_key_token, name, url, source, read_size_b,
+                                     bundle_folder=self._bundle_folder(os.path.join(dirroot, relative_path)))
                 pool_queue.append(args)
 
             thread = Thread(target=pbar_thread, args=(message_queue, total_size, source, socket_events, desc, max_threads))    
@@ -840,6 +878,10 @@ class Device:
                 # something is wrong!  This isn't in the watch directory
                 # skipping this file so we don't accidently delete something important!
                 debug_print(f"Not deleting {item}, it is not in my watch list")
+                continue
+
+            if self._bundle_folder(fullpath):
+                bundles.remove(fullpath, self.m_bundle_dirs)
                 continue
 
             if os.path.exists(fullpath):
@@ -969,11 +1011,15 @@ class Device:
         reconnect = False
  
         config = request.json
+        _, errors = bundles.compile_patterns(config.get("bundle_dirs"))
+        if errors:
+            msg = "; ".join(f"{p!r}: {e}" for p, e in errors)
+            return jsonify({"message": f"Invalid folder bundle pattern {msg}"}), 400
         with self.session_lock:
             for key in config:
                 if key in self.m_config:
                     if self.m_config[key] != config[key]:
-                        if key in ("watch", "exclude_dirs"):
+                        if key in ("watch", "exclude_dirs", "bundle_dirs", "bundle_settle_s"):
                             rescan = True
                         if key == "robot_name":
                             reconnect = True
@@ -981,6 +1027,7 @@ class Device:
                     self.m_config[key] = config[key]
                 
             self.m_exclude_dirs = dirfilter.compile_patterns(self.m_config.get("exclude_dirs"))
+            self._compile_bundles()
             debug_print("updated config")
 
             # Persist the merged config, not just the fields the dashboard posted,

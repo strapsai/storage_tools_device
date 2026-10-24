@@ -208,10 +208,38 @@
                                                 <td>
                                                     <div id="include_suffix-list"></div>
                                                     <div class="input-group mb-3">
-                                                        <input type="text" id="new-suffix-item" class="form-control"
+                                                        <input type="text" id="new-include_suffix-item" class="form-control"
                                                             placeholder="Add new suffix">
                                                         <button type="button" class="btn btn-success"
                                                             onclick="addListItem('include_suffix')">Add</button>
+                                                    </div>
+                                                </td>
+                                            </tr>
+                                            <!-- Folder bundles -->
+                                            <tr>
+                                                <td class="text-end align-top"><label class="form-label">Folder
+                                                        Bundles</label>
+                                                    <span class="question-circle" data-bs-toggle="tooltip"
+                                                        title="Regular expressions matched against whole folder names. A matching folder is uploaded as one .tar file; the scan does not look inside it, so its files are never uploaded on their own, whatever their suffix.">?</span>
+                                                </td>
+                                                <td>
+                                                    <div id="bundle_dirs-list"></div>
+                                                    <div class="input-group mb-1">
+                                                        <input type="text" id="new-bundle_dirs-item" class="form-control font-monospace"
+                                                            placeholder="e.g. \d{4}(_\d{2}){5}\.tmux">
+                                                        <button type="button" class="btn btn-success"
+                                                            onclick="addListItem('bundle_dirs')">Add</button>
+                                                    </div>
+                                                    <div class="form-text mb-2">
+                                                        Python regex, matched against the <em>whole</em> folder name (not its path).
+                                                        A matching folder becomes <code>&lt;folder&gt;.tar</code>; a changed folder is
+                                                        uploaded again as a new tar. Check a new pattern with care: everything in a
+                                                        matching folder, however large, goes into one file.
+                                                    </div>
+                                                    <div class="input-group mb-3">
+                                                        <span class="input-group-text">Settle time (s)</span>
+                                                        <input type="number" id="bundle_settle_s" class="form-control" min="0"
+                                                            title="A folder is bundled only after nothing in it has changed for this long, so a folder that is still being written is not captured half way.">
                                                     </div>
                                                 </td>
                                             </tr>
