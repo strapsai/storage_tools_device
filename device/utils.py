@@ -311,9 +311,19 @@ def _getMetaDataMCAP(filename: str, local_tz:str) -> dict:
 
         # mcap does not have a for free message count.  
         topics = {}
-        for _, channel, message in reader.iter_messages():
-            topic = channel.topic
-            topics[topic] = topics.get(topic, 0) +1
+        try:
+            for _, channel, message in reader.iter_messages():
+                topic = channel.topic
+                topics[topic] = topics.get(topic, 0) +1
+        except Exception as e:
+            # A damaged chunk (e.g. a zstd checksum mismatch) inside an otherwise readable file.
+            # Keep the file, with the per-topic counts the summary recorded when it was written.
+            debug_print(f"Failed to read messages in {filename} because {e}; using summary counts")
+            topics = {}
+            for channel_id, count in summary.statistics.channel_message_counts.items():
+                channel = summary.channels.get(channel_id)
+                if channel is not None:
+                    topics[channel.topic] = topics.get(channel.topic, 0) + count
 
 
         start_time_ros = summary.statistics.message_start_time
